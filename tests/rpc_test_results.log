@@ -1,0 +1,83 @@
+2025-04-17 11:20:02,167 - INFO - 將測試 4 個Solana RPC端點
+2025-04-17 11:20:02,168 - INFO - 測試RPC端點: https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc
+2025-04-17 11:20:03,524 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:03,692 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:03,862 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:03,890 - INFO -   Slot: 333976308
+2025-04-17 11:20:03,890 - INFO -   餘額測試: 成功
+2025-04-17 11:20:03,890 - INFO - 測試RPC端點: https://radial-nameless-feather.solana-mainnet.quiknode.pro/609be45a63a9c900ddb4408fdb140aee21f82213
+2025-04-17 11:20:04,062 - INFO -   錯誤信息: 連接錯誤: Cannot connect to host radial-nameless-feather.solana-mainnet.quiknode.pro:443 ssl:default [[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1007)]
+2025-04-17 11:20:04,063 - INFO - 測試RPC端點: https://api.mainnet-beta.solana.com
+2025-04-17 11:20:04,985 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:20:05,131 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:20:05,281 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:20:05,283 - INFO -   Slot: 333976313
+2025-04-17 11:20:05,283 - INFO -   餘額測試: 成功
+2025-04-17 11:20:05,283 - INFO - 測試RPC端點: https://solana-api.projectserum.com
+2025-04-17 11:20:16,168 - INFO -   錯誤信息: 連接超時
+2025-04-17 11:20:16,168 - INFO - 
+==================================================
+2025-04-17 11:20:16,168 - INFO - Solana RPC端點測試報告
+2025-04-17 11:20:16,168 - INFO - ==================================================
+2025-04-17 11:20:16,168 - INFO - 測試時間: 2025-04-17 11:20:16
+2025-04-17 11:20:16,168 - INFO - 測試端點總數: 4
+2025-04-17 11:20:16,168 - INFO - 正常運作的端點: 2
+2025-04-17 11:20:16,168 - INFO - 問題端點: 2
+2025-04-17 11:20:16,169 - INFO - 
+正常運作的端點 (按回應時間排序):
+2025-04-17 11:20:16,169 - INFO - 1. https://api.mainnet-beta.solana.com - 回應時間: 1.22秒, Slot: 333976313
+2025-04-17 11:20:16,169 - INFO - 2. https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc - 回應時間: 1.7秒, Slot: 333976308
+2025-04-17 11:20:16,169 - INFO - 
+問題端點:
+2025-04-17 11:20:16,169 - INFO - 1. https://radial-nameless-feather.solana-mainnet.quiknode.pro/609be45a63a9c900ddb4408fdb140aee21f82213 - 狀態: error
+2025-04-17 11:20:16,169 - INFO -    錯誤信息: 連接錯誤: Cannot connect to host radial-nameless-feather.solana-mainnet.quiknode.pro:443 ssl:default [[SSL: TLSV1_ALERT_INTERNAL_ERROR] tlsv1 alert internal error (_ssl.c:1007)]
+2025-04-17 11:20:16,169 - INFO - 2. https://solana-api.projectserum.com - 狀態: error
+2025-04-17 11:20:16,169 - INFO -    錯誤信息: 連接超時
+2025-04-17 11:20:16,169 - INFO - ==================================================
+2025-04-17 11:20:16,169 - INFO - 
+推薦使用的端點: https://api.mainnet-beta.solana.com
+2025-04-17 11:20:16,170 - INFO - 回應時間: 1.22秒
+2025-04-17 11:20:16,170 - INFO - 測試結果已保存到 rpc_test_results.json
+2025-04-17 11:20:58,501 - INFO - 將測試 4 個Solana RPC端點
+2025-04-17 11:20:58,501 - INFO - 測試RPC端點: https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc
+2025-04-17 11:20:59,628 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:59,792 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:59,957 - INFO - HTTP Request: POST https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc "HTTP/1.1 200 OK"
+2025-04-17 11:20:59,960 - INFO -   Slot: 333976448
+2025-04-17 11:20:59,961 - INFO -   餘額測試: 成功
+2025-04-17 11:20:59,961 - INFO - 測試RPC端點: https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/
+2025-04-17 11:21:01,002 - INFO - HTTP Request: POST https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/ "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,167 - INFO - HTTP Request: POST https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/ "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,333 - INFO - HTTP Request: POST https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/ "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,335 - INFO -   Slot: 333976453
+2025-04-17 11:21:01,335 - INFO -   餘額測試: 成功
+2025-04-17 11:21:01,335 - INFO - 測試RPC端點: https://api.mainnet-beta.solana.com
+2025-04-17 11:21:01,805 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,876 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,944 - INFO - HTTP Request: POST https://api.mainnet-beta.solana.com "HTTP/1.1 200 OK"
+2025-04-17 11:21:01,946 - INFO -   Slot: 333976455
+2025-04-17 11:21:01,946 - INFO -   餘額測試: 成功
+2025-04-17 11:21:01,946 - INFO - 測試RPC端點: https://solana-api.projectserum.com
+2025-04-17 11:21:12,168 - INFO -   錯誤信息: 連接超時
+2025-04-17 11:21:12,169 - INFO - 
+==================================================
+2025-04-17 11:21:12,169 - INFO - Solana RPC端點測試報告
+2025-04-17 11:21:12,169 - INFO - ==================================================
+2025-04-17 11:21:12,169 - INFO - 測試時間: 2025-04-17 11:21:12
+2025-04-17 11:21:12,169 - INFO - 測試端點總數: 4
+2025-04-17 11:21:12,169 - INFO - 正常運作的端點: 3
+2025-04-17 11:21:12,169 - INFO - 問題端點: 1
+2025-04-17 11:21:12,169 - INFO - 
+正常運作的端點 (按回應時間排序):
+2025-04-17 11:21:12,169 - INFO - 1. https://api.mainnet-beta.solana.com - 回應時間: 0.61秒, Slot: 333976455
+2025-04-17 11:21:12,169 - INFO - 2. https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/ - 回應時間: 1.37秒, Slot: 333976453
+2025-04-17 11:21:12,169 - INFO - 3. https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc - 回應時間: 1.46秒, Slot: 333976448
+2025-04-17 11:21:12,170 - INFO - 
+問題端點:
+2025-04-17 11:21:12,170 - INFO - 1. https://solana-api.projectserum.com - 狀態: error
+2025-04-17 11:21:12,170 - INFO -    錯誤信息: 連接超時
+2025-04-17 11:21:12,170 - INFO - ==================================================
+2025-04-17 11:21:12,170 - INFO - 
+推薦使用的端點: https://api.mainnet-beta.solana.com
+2025-04-17 11:21:12,170 - INFO - 回應時間: 0.61秒
+2025-04-17 11:21:12,171 - INFO - 測試結果已保存到 rpc_test_results.json

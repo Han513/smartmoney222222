@@ -1,17 +1,18 @@
+import uuid
+import time
+import json
+import asyncio
+import logging
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
-import uuid
-import time
-import asyncio
 from app.services.wallet_analyzer import WalletAnalyzer
 from app.services.cache_service import CacheService
 from app.workers.tasks import process_wallet_batch
 from app.core.config import settings
-import logging
-import json
 from app.services.solscan import solscan_client
+from app.services.kafka_consumer import kafka_consumer
 
 router = APIRouter(prefix="/wallets")
 cache_service = CacheService()
@@ -331,6 +332,33 @@ async def get_wallet_analysis(
             },
             "last_updated": int(time.time())
         }
+    
+@router.get("/kafka/status")
+async def check_kafka_status():
+    """
+    檢查 Kafka 消費者服務狀態
+    """
+    return {
+        "running": kafka_consumer.running,
+        "bootstrap_servers": kafka_consumer.bootstrap_servers,
+        "topic": kafka_consumer.topic,
+        "group_id": kafka_consumer.group_id
+    }
+
+@router.post("/kafka/restart")
+async def restart_kafka_consumer():
+    """
+    重啟 Kafka 消費者服務
+    """
+    if kafka_consumer.running:
+        await kafka_consumer.stop()
+    
+    success = await kafka_consumer.start()
+    
+    return {
+        "success": success,
+        "running": kafka_consumer.running
+    }
 
 # 更簡單的測試端點，不使用 Pydantic 模型
 @router.post("/analyze-simple")

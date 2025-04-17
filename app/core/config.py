@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     CELERY_RESULT_SERIALIZER: str = "json"
     CELERY_ACCEPT_CONTENT: List[str] = ["json"]
     CELERY_TIMEZONE: str = "UTC"
+
+    # Kafka 配置
+    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("127.0.0.1:8998", "localhost:8998")
+    KAFKA_TOPIC: str = os.getenv("web3_trade_events", "web3_trade_events")
+    KAFKA_GROUP_ID: str = os.getenv("KAFKA_GROUP_ID", "wallet_analyzer_group")
     
     # 安全配置 - 移除 API_KEYS
     SECRET_KEY: str = Field(default="your-secret-key-here")

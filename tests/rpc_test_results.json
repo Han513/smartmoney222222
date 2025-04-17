@@ -1,0 +1,67 @@
+[
+  {
+    "url": "https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc",
+    "status": "ok",
+    "message": "RPC\u5065\u5eb7\u72c0\u614b: \u6b63\u5e38",
+    "response_time": 1.46,
+    "block_height": null,
+    "slot": 333976448,
+    "balance_test": true,
+    "get_block_test": true,
+    "timestamp": "2025-04-17T11:20:58.501678",
+    "health_response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": "ok"
+    },
+    "solana_version": "{\"jsonrpc\":\"2.0\",\"result\":{\"solana-core\":\"2.1.18\",\"feature-set\":3271415109},\"id\":0}",
+    "test_wallet_balance": 1.035054276
+  },
+  {
+    "url": "https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/",
+    "status": "ok",
+    "message": "RPC\u5065\u5eb7\u72c0\u614b: \u6b63\u5e38",
+    "response_time": 1.37,
+    "block_height": null,
+    "slot": 333976453,
+    "balance_test": true,
+    "get_block_test": true,
+    "timestamp": "2025-04-17T11:20:59.961693",
+    "health_response": {
+      "jsonrpc": "2.0",
+      "id": 1,
+      "result": "ok"
+    },
+    "solana_version": "{\"jsonrpc\":\"2.0\",\"result\":{\"solana-core\":\"2.1.18\",\"feature-set\":3271415109},\"id\":0}",
+    "test_wallet_balance": 1.035054276
+  },
+  {
+    "url": "https://api.mainnet-beta.solana.com",
+    "status": "ok",
+    "message": "RPC\u5065\u5eb7\u72c0\u614b: \u6b63\u5e38",
+    "response_time": 0.61,
+    "block_height": null,
+    "slot": 333976455,
+    "balance_test": true,
+    "get_block_test": true,
+    "timestamp": "2025-04-17T11:21:01.335202",
+    "health_response": {
+      "jsonrpc": "2.0",
+      "result": "ok",
+      "id": 1
+    },
+    "solana_version": "{\"jsonrpc\":\"2.0\",\"result\":{\"solana-core\":\"2.1.16\",\"feature-set\":3271415109},\"id\":0}",
+    "test_wallet_balance": 1.035054276
+  },
+  {
+    "url": "https://solana-api.projectserum.com",
+    "status": "error",
+    "message": "\u9023\u63a5\u8d85\u6642",
+    "response_time": 10.22,
+    "block_height": null,
+    "slot": null,
+    "balance_test": false,
+    "get_block_test": false,
+    "timestamp": "2025-04-17T11:21:01.946708"
+  }
+]

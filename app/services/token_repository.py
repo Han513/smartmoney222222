@@ -1009,7 +1009,7 @@ class TokenRepository:
                 session.add(new_token)
             
             session.commit()
-            logger.info(f"成功保存代幣 {token_data['address']} 信息到數據庫")
+            # logger.info(f"成功保存代幣 {token_data['address']} 信息到數據庫")
             return True
         except SQLAlchemyError as e:
             logger.error(f"保存代幣信息到數據庫時錯誤: {e}")

@@ -1,13 +1,15 @@
 import os
 import re
 import time
+import asyncio
 import base58
 import logging
 import requests
+import sqlalchemy
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, getcontext
 from typing import Dict, List, Any, Optional, Tuple
-from sqlalchemy import create_engine, select, update
+from sqlalchemy import create_engine, select, update, and_
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from app.core.config import settings
@@ -16,7 +18,8 @@ from app.services.token_repository import token_repository
 from app.services.solscan import solscan_client
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
-import asyncio
+from app.services.cache_service import cache_service
+
 
 # 設置 Decimal 精度
 getcontext().prec = 28
@@ -295,86 +298,7 @@ class TransactionProcessor:
     #     except Exception as e:
     #         logger.exception(f"更新 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
     #         return False
-    def update_token_buy_data(self, wallet_address: str, token_address: str, buy_data: Dict) -> bool:
-        """更新代幣購買數據"""
-        db_ready = self._init_db_connection()
-        if not db_ready:
-            logger.error(f"無法更新 {wallet_address}/{token_address} 購買數據，因數據庫未就緒")
-            return False
-
-        try:
-            # 調試日誌，記錄詳細信息
-            logger.info(f"更新代幣購買數據: 地址={wallet_address}, 代幣={token_address}, 數據={buy_data}")
-            
-            amount = Decimal(str(buy_data.get("amount", 0)))
-            cost = Decimal(str(buy_data.get("cost", 0)))
-            is_buy = buy_data.get("is_buy", True)
-            
-            # 更多調試信息
-            logger.info(f"解析後數據: amount={amount}, cost={cost}, is_buy={is_buy}")
-
-            with self.session_factory() as session:
-                query = session.execute(
-                    select(TokenBuyData).where(
-                        (TokenBuyData.wallet_address == wallet_address) &
-                        (TokenBuyData.token_address == token_address)
-                    ).with_for_update()
-                )
-                buy_record = query.scalars().first()
-
-                if buy_record:
-                    # 記錄現有數據
-                    logger.info(f"找到現有記錄: 總量={buy_record.total_amount}, 總成本={buy_record.total_cost}")
-                    
-                    current_amount = Decimal(str(buy_record.total_amount or 0.0))
-                    current_cost = Decimal(str(buy_record.total_cost or 0.0))
-                    
-                    new_total_amount = current_amount + amount
-                    # 只有買入時才更新成本
-                    new_total_cost = current_cost + (cost if is_buy else Decimal(0))
-                    
-                    logger.info(f"計算新值: 新總量={new_total_amount}, 新總成本={new_total_cost}")
-                    
-                    buy_record.total_amount = float(new_total_amount)
-                    buy_record.total_cost = float(new_total_cost)
-                    buy_record.updated_at = datetime.now()
-                    
-                    if new_total_amount > 0:
-                        if new_total_cost > 0:
-                            buy_record.avg_buy_price = float(new_total_cost / new_total_amount)
-                            logger.info(f"更新平均買入價: {buy_record.avg_buy_price}")
-                        else:
-                            buy_record.avg_buy_price = 0.0
-                    else:
-                        buy_record.avg_buy_price = 0.0
-                        if new_total_amount == 0:
-                            buy_record.total_cost = 0.0
-                else:
-                    logger.info(f"未找到現有記錄，準備創建新記錄")
-                    # 只有買入或者正數金額時才創建記錄
-                    if is_buy or amount > 0:
-                        logger.info(f"創建新記錄: 買入={is_buy}, 數量={amount}")
-                        avg_price = cost / amount if amount != 0 else Decimal(0)
-                        new_record = TokenBuyData(
-                            wallet_address=wallet_address,
-                            token_address=token_address,
-                            total_amount=float(amount),
-                            total_cost=float(cost),
-                            avg_buy_price=float(avg_price),
-                            updated_at=datetime.now()
-                        )
-                        session.add(new_record)
-                        logger.info(f"新記錄已添加到會話")
-                    else:
-                        logger.warning(f"跳過創建記錄: 非買入交易且金額不為正數: {wallet_address}/{token_address} 數量={amount}")
-
-                session.commit()
-                logger.info(f"交易已提交到數據庫")
-                return True
-
-        except Exception as e:
-            logger.exception(f"更新 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
-            return False
+    
     
     # async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     #     """處理錢包活動記錄 - 优化版本，支持大批量处理"""
@@ -1093,7 +1017,7 @@ class TransactionProcessor:
         
         logger.info(f"嘗試批量保存 {len(transactions)} 筆交易")
         signatures = [tx.get("signature") for tx in transactions if "signature" in tx]
-        logger.info(f"交易簽名樣本: {signatures[:3] if signatures else '無'}")
+        # logger.info(f"交易簽名樣本: {signatures[:3] if signatures else '無'}")
         
         # 优化1: 确保数据库连接始终正常
         db_ready = self._init_db_connection()
@@ -1117,7 +1041,7 @@ class TransactionProcessor:
                         existing_signatures = set(result)
                     except Exception as e:
                         logger.warning(f"查詢現有交易簽名時出錯，將假設全部為新交易: {str(e)}")
-                logger.info(f"查詢到 {len(existing_signatures)}/{len(signatures)} 個現有交易簽名")
+                # logger.info(f"查詢到 {len(existing_signatures)}/{len(signatures)} 個現有交易簽名")
                 
                 # 优化3: 分离新增和更新操作
                 inserts = []
@@ -1436,12 +1360,12 @@ class TransactionProcessor:
                         # 計算平均買入價格
                         if historical_buy_amount > 0:
                             avg_buy_price = historical_buy_cost / historical_buy_amount
-                            logger.info(f"從數據庫獲取平均買入價格: {avg_buy_price}")
+                            # logger.info(f"從數據庫獲取平均買入價格: {avg_buy_price}")
                     except Exception as e:
                         logger.error(f"獲取歷史買入數據時出錯: {e}")
                 
                 sell_price = float(price)
-                logger.info(f"賣出計算 - 代幣: {token_address}, 平均買入價: {avg_buy_price}, 賣出價: {sell_price}, 數量: {float(amount)}")
+                # logger.info(f"賣出計算 - 代幣: {token_address}, 平均買入價: {avg_buy_price}, 賣出價: {sell_price}, 數量: {float(amount)}")
                 
                 if avg_buy_price > 0 and float(amount) > 0:
                     # 計算利潤
@@ -1453,7 +1377,7 @@ class TransactionProcessor:
                     else:
                         realized_profit_percentage = 0
                         
-                    logger.info(f"計算利潤 - 成本基礎: {cost_basis}, 銷售價值: {float(value_decimal)}, 利潤: {realized_profit}, 利潤比例: {realized_profit_percentage}%")
+                    # logger.info(f"計算利潤 - 成本基礎: {cost_basis}, 銷售價值: {float(value_decimal)}, 利潤: {realized_profit}, 利潤比例: {realized_profit_percentage}%")
                 else:
                     realized_profit = 0
                     realized_profit_percentage = 0
@@ -1610,7 +1534,7 @@ class TransactionProcessor:
         增强错误处理和批处理效率
         """
         tx_hash_main = bulk_activity_data.get("tx_hash", "N/A")
-        logger.info(f"處理批量代幣活動 (主 Tx: {tx_hash_main}) for {wallet_address}")
+        # logger.info(f"處理批量代幣活動 (主 Tx: {tx_hash_main}) for {wallet_address}")
         
         try:
             activities = bulk_activity_data.get('activities', [])
@@ -1704,7 +1628,7 @@ class TransactionProcessor:
                     "message": "No valid sub-activities processed"
                 }
             
-            logger.info(f"處理批量代幣活動 {tx_hash_main} 完成: {processed_count}/{total_count} 筆活動")
+            # logger.info(f"處理批量代幣活動 {tx_hash_main} 完成: {processed_count}/{total_count} 筆活動")
             return {
                 "success": True,
                 "transaction_hash": tx_hash_main,
@@ -1891,7 +1815,7 @@ class TransactionProcessor:
 
     async def update_missing_profits(self):
         """更新缺失的交易利潤數據"""
-        logger.info("開始更新缺失的交易利潤數據")
+        # logger.info("開始更新缺失的交易利潤數據")
         
         db_ready = self._init_db_connection()
         if not db_ready:
@@ -1949,169 +1873,429 @@ class TransactionProcessor:
             logger.exception(f"更新交易利潤數據時出錯: {e}")
             return False
     
-    # def save_transaction(self, transaction: Dict[str, Any]) -> bool:
+    # async def save_transaction(self, transaction: Dict[str, Any]) -> bool:
     #     try:
     #         signature = transaction.get("signature")
+    #         transaction_time = transaction.get("transaction_time")
     #         if not signature:
     #             logger.error("保存交易失敗: 缺少簽名")
     #             return False
         
     #         with self.session_factory() as session:
-    #             # 查詢是否存在相同signature的交易
-    #             query = select(Transaction).where(Transaction.signature == signature)
-    #             existing_transaction = session.execute(query).scalars().first()
-                
-    #             # 獲取所有需要的代幣信息
-    #             token_address = transaction.get("token_address")
-    #             from_token_address = transaction.get("from_token_address")
-    #             dest_token_address = transaction.get("dest_token_address")
-                
-    #             # 獲取代幣信息
-    #             token_info = self.get_token_info_safely(token_address)
-    #             from_token_info = self.get_token_info_safely(from_token_address)
-    #             dest_token_info = self.get_token_info_safely(dest_token_address)
-                
-    #             # 更新交易數據
-    #             if token_info:
-    #                 if "token_name" not in transaction or not transaction["token_name"]:
-    #                     transaction["token_name"] = token_info.get("symbol") or token_info.get("name")
+    #             try:
+    #                 # 查詢是否存在相同signature的交易
+    #                 query = select(Transaction).where(
+    #                     and_(
+    #                         Transaction.signature == signature,
+    #                         Transaction.transaction_time == transaction.get("transaction_time")
+    #                     )
+    #                 )
+    #                 existing_transaction = session.execute(query).scalars().first()
                     
-    #                 if "token_icon" not in transaction or not transaction["token_icon"]:
-    #                     transaction["token_icon"] = token_info.get("icon") or token_info.get("url")
+    #                 # 獲取所有需要的代幣信息
+    #                 token_address = transaction.get("token_address")
+    #                 from_token_address = transaction.get("from_token_address")
+    #                 dest_token_address = transaction.get("dest_token_address")
                     
-    #                 # 計算marketcap (如果有supply_float)
-    #                 if "marketcap" not in transaction or not transaction["marketcap"]:
-    #                     price = self._convert_to_float(transaction.get("price", 0))
-    #                     # 從token_info獲取supply_float，如果沒有則使用預設值
-    #                     supply_float = token_info.get("supply_float", 1000000000)  # 預設供應量為10億
-    #                     if price:  # 只要有價格就計算marketcap
-    #                         transaction["marketcap"] = price * supply_float
-    #                     else:
-    #                         transaction["marketcap"] = 0  # 如果沒有價格，marketcap設為0而不是null
-                
-    #             # 更新代幣符號
-    #             if from_token_info and "from_token_symbol" not in transaction:
-    #                 transaction["from_token_symbol"] = from_token_info.get("symbol")
-                
-    #             if dest_token_info and "dest_token_symbol" not in transaction:
-    #                 transaction["dest_token_symbol"] = dest_token_info.get("symbol")
+    #                 # 獲取代幣信息
+    #                 token_info = self.get_token_info_safely(token_address)
+    #                 from_token_info = self.get_token_info_safely(from_token_address)
+    #                 dest_token_info = self.get_token_info_safely(dest_token_address)
+                    
+    #                 # 更新交易數據
+    #                 if token_info:
+    #                     if "token_name" not in transaction or not transaction["token_name"]:
+    #                         transaction["token_name"] = token_info.get("symbol") or token_info.get("name")
+                        
+    #                     if "token_icon" not in transaction or not transaction["token_icon"]:
+    #                         transaction["token_icon"] = token_info.get("icon") or token_info.get("url")
+                        
+    #                     # 計算marketcap (如果有supply_float)
+    #                     if "marketcap" not in transaction or not transaction["marketcap"]:
+    #                         price = self._convert_to_float(transaction.get("price", 0))
+    #                         # 從token_info獲取supply_float，如果沒有則使用預設值
+    #                         supply_float = token_info.get("supply_float", 1000000000)  # 預設供應量為10億
+    #                         if price:  # 只要有價格就計算marketcap
+    #                             transaction["marketcap"] = price * supply_float
+    #                         else:
+    #                             transaction["marketcap"] = 0  # 如果沒有價格，marketcap設為0而不是null
+                    
+    #                 # 更新代幣符號
+    #                 if from_token_info and "from_token_symbol" not in transaction:
+    #                     transaction["from_token_symbol"] = from_token_info.get("symbol")
+                    
+    #                 if dest_token_info and "dest_token_symbol" not in transaction:
+    #                     transaction["dest_token_symbol"] = dest_token_info.get("symbol")
 
-    #             # 計算holding_percentage
-    #             transaction_type = transaction.get("transaction_type")
-    #             amount = self._convert_to_float(transaction.get("amount", 0))
-    #             value = self._convert_to_float(transaction.get("value", 0))
-    #             wallet_address = transaction.get("wallet_address")
-                
-    #             if transaction_type == "buy" and value > 0:
-    #                 wallet_balance = self._convert_to_float(transaction.get("wallet_balance", 0))
-    #                 holding_pct = value / (wallet_balance + value) * 100
-    #                 transaction["holding_percentage"] = min(100, max(-100, holding_pct))
-    #             elif transaction_type == "sell" and amount > 0:
-    #                 token_buy_data = self.get_token_buy_data(wallet_address, token_address)
-    #                 current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
-    #                 if current_amount > 0:
-    #                     holding_pct = (amount / current_amount) * 100
+    #                 # 計算holding_percentage
+    #                 transaction_type = transaction.get("transaction_type")
+    #                 amount = self._convert_to_float(transaction.get("amount", 0))
+    #                 value = self._convert_to_float(transaction.get("value", 0))
+    #                 wallet_address = transaction.get("wallet_address")
+                    
+    #                 if transaction_type == "buy" and value > 0:
+    #                     wallet_balance = self._convert_to_float(transaction.get("wallet_balance", 0))
+    #                     holding_pct = value / (wallet_balance + value) * 100
     #                     transaction["holding_percentage"] = min(100, max(-100, holding_pct))
-    #                 else:
-    #                     transaction["holding_percentage"] = 100
-                
-    #             # 計算realized_profit和realized_profit_percentage (只有賣出才有)
-    #             if transaction_type == "sell":
-    #                 token_buy_data = self.get_token_buy_data(wallet_address, token_address)
-    #                 avg_buy_price = self._convert_to_float(token_buy_data.get("avg_buy_price", 0))
-    #                 sell_price = self._convert_to_float(transaction.get("price", 0))
+    #                 elif transaction_type == "sell" and amount > 0:
+    #                     token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+    #                     current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
+    #                     if current_amount > 0:
+    #                         holding_pct = (amount / current_amount) * 100
+    #                         transaction["holding_percentage"] = min(100, max(-100, holding_pct))
+    #                     else:
+    #                         transaction["holding_percentage"] = 100
                     
-    #                 logger.info(f"賣出交易計算利潤: 地址={wallet_address}, 代幣={token_address}")
-    #                 logger.info(f"獲取到的avg_buy_price={avg_buy_price}, sell_price={sell_price}, amount={amount}")
-    #                 logger.info(f"token_buy_data={token_buy_data}")
-                    
-    #                 if avg_buy_price > 0 and amount > 0:
-    #                     realized_profit, realized_profit_percentage = self.calculate_realized_profit(token_address, amount, sell_price, avg_buy_price)
-    #                     realized_profit_percentage = min(1000, max(-100, realized_profit_percentage))
-    #                     transaction["realized_profit"] = realized_profit
-    #                     transaction["realized_profit_percentage"] = realized_profit_percentage
-    #                     logger.info(f"計算結果: realized_profit={realized_profit}, realized_profit_percentage={realized_profit_percentage}")
+    #                 # 計算realized_profit和realized_profit_percentage (只有賣出才有)
+    #                 if transaction_type == "sell":
+    #                     token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+    #                     avg_buy_price = self._convert_to_float(token_buy_data.get("avg_buy_price", 0))
+    #                     sell_price = self._convert_to_float(transaction.get("price", 0))
+                        
+    #                     # logger.info(f"賣出交易計算利潤: 地址={wallet_address}, 代幣={token_address}")
+    #                     # logger.info(f"獲取到的avg_buy_price={avg_buy_price}, sell_price={sell_price}, amount={amount}")
+    #                     # logger.info(f"token_buy_data={token_buy_data}")
+                        
+    #                     if avg_buy_price > 0 and amount > 0:
+    #                         realized_profit, realized_profit_percentage = self.calculate_realized_profit(token_address, amount, sell_price, avg_buy_price)
+    #                         realized_profit_percentage = min(1000, max(-100, realized_profit_percentage))
+    #                         transaction["realized_profit"] = realized_profit
+    #                         transaction["realized_profit_percentage"] = realized_profit_percentage
+    #                         # logger.info(f"計算結果: realized_profit={realized_profit}, realized_profit_percentage={realized_profit_percentage}")
+    #                     else:
+    #                         logger.warning(f"無法計算利潤: avg_buy_price={avg_buy_price}, amount={amount}")
+    #                         transaction["realized_profit"] = 0
+    #                         transaction["realized_profit_percentage"] = 0
     #                 else:
-    #                     logger.warning(f"無法計算利潤: avg_buy_price={avg_buy_price}, amount={amount}")
+    #                     # 買入時這些值為0
     #                     transaction["realized_profit"] = 0
     #                     transaction["realized_profit_percentage"] = 0
-    #             else:
-    #                 # 買入時這些值為0
-    #                 transaction["realized_profit"] = 0
-    #                 transaction["realized_profit_percentage"] = 0
 
-    #             time = datetime.now(tz_utc8)
-    #             formatted_time = time.strftime('%Y-%m-%d %H:%M:%S.%f')
+    #                 time = datetime.now(tz_utc8)
+    #                 formatted_time = time.strftime('%Y-%m-%d %H:%M:%S.%f')
 
-    #             if not transaction.get("wallet_balance"):
-    #                 try:
-    #                     sol_balance = self.get_sol_balance(wallet_address)
-    #                     if sol_balance and sol_balance.get("balance"):
-    #                         transaction["wallet_balance"] = sol_balance.get("balance", {}).get("float", 0)
-    #                     else:
-    #                         logger.warning(f"無法獲取 {wallet_address} 的餘額，使用預設值 0")
-    #                         transaction["wallet_balance"] = 0
-    #                 except Exception as e:
-    #                     logger.error(f"獲取餘額時出錯: {e}")
-    #                     transaction["wallet_balance"] = 0  # 使用預設值
+    #                 if not transaction.get("wallet_balance"):
+    #                     try:
+    #                         sol_balance = await self.get_sol_balance(wallet_address)
+    #                         if sol_balance and sol_balance.get("balance"):
+    #                             transaction["wallet_balance"] = sol_balance.get("balance", {}).get("float", 0)
+    #                         else:
+    #                             logger.warning(f"無法獲取 {wallet_address} 的餘額，使用預設值 0")
+    #                             transaction["wallet_balance"] = 0
+    #                     except Exception as e:
+    #                         logger.error(f"獲取餘額時出錯: {e}")
+    #                         transaction["wallet_balance"] = 0  # 使用預設值
 
-    #             # 如果交易已存在，則更新它
-    #             if existing_transaction:
-    #                 logger.info(f"交易 {signature} 已存在，正在更新...")
+    #                 # 如果交易已存在，則更新它
+    #                 if existing_transaction:
+    #                     # logger.info(f"交易 {signature} 已存在，正在更新...")
+                        
+    #                     # 更新現有記錄的各個欄位
+    #                     existing_transaction.wallet_balance = transaction.get("wallet_balance")
+    #                     existing_transaction.token_name = transaction.get("token_name")
+    #                     existing_transaction.token_icon = transaction.get("token_icon")
+    #                     existing_transaction.value = self._convert_to_float(transaction.get("value"))
+    #                     existing_transaction.price = self._convert_to_float(transaction.get("price"))
+    #                     existing_transaction.marketcap = transaction.get("marketcap")
+    #                     existing_transaction.from_token_symbol = transaction.get("from_token_symbol")
+    #                     existing_transaction.dest_token_symbol = transaction.get("dest_token_symbol")
+    #                     existing_transaction.holding_percentage = self._convert_to_float(transaction.get("holding_percentage", 0))
+    #                     existing_transaction.realized_profit = self._convert_to_float(transaction.get("realized_profit", 0))
+    #                     existing_transaction.realized_profit_percentage = self._convert_to_float(transaction.get("realized_profit_percentage", 0))
+    #                     existing_transaction.time = formatted_time  # 更新時間戳
+                        
+    #                     session.commit()
+    #                     # logger.info(f"成功更新交易 {signature}")
+    #                     return True
+    #                 else:
+    #                     # 如果交易不存在，創建新記錄
+    #                     new_transaction = Transaction(
+    #                         wallet_address=wallet_address,
+    #                         wallet_balance=transaction.get("wallet_balance"),
+    #                         signature=signature,
+    #                         transaction_time=transaction.get("transaction_time"),
+    #                         transaction_type=transaction_type,
+    #                         token_address=token_address,
+    #                         token_name=transaction.get("token_name"),
+    #                         token_icon=transaction.get("token_icon"),
+    #                         marketcap=transaction.get("marketcap"),
+    #                         amount=self._convert_to_float(transaction.get("amount")),
+    #                         value=self._convert_to_float(transaction.get("value")),
+    #                         price=self._convert_to_float(transaction.get("price")),
+    #                         holding_percentage=self._convert_to_float(transaction.get("holding_percentage", 0)),
+    #                         realized_profit=self._convert_to_float(transaction.get("realized_profit", 0)),
+    #                         realized_profit_percentage=self._convert_to_float(transaction.get("realized_profit_percentage", 0)),
+    #                         chain=transaction.get("chain", "SOLANA"),
+    #                         from_token_address=from_token_address,
+    #                         from_token_symbol=transaction.get("from_token_symbol"),
+    #                         from_token_amount=self._convert_to_float(transaction.get("from_token_amount")),
+    #                         dest_token_address=dest_token_address,
+    #                         dest_token_symbol=transaction.get("dest_token_symbol"),
+    #                         dest_token_amount=self._convert_to_float(transaction.get("dest_token_amount")),
+    #                         time=formatted_time
+    #                     )
+    #                     session.add(new_transaction)
+    #                     session.commit()
+    #                     return True
                     
-    #                 # 更新現有記錄的各個欄位
-    #                 existing_transaction.wallet_balance = transaction.get("wallet_balance")
-    #                 existing_transaction.token_name = transaction.get("token_name")
-    #                 existing_transaction.token_icon = transaction.get("token_icon")
-    #                 existing_transaction.value = self._convert_to_float(transaction.get("value"))
-    #                 existing_transaction.price = self._convert_to_float(transaction.get("price"))
-    #                 existing_transaction.marketcap = transaction.get("marketcap")
-    #                 existing_transaction.from_token_symbol = transaction.get("from_token_symbol")
-    #                 existing_transaction.dest_token_symbol = transaction.get("dest_token_symbol")
-    #                 existing_transaction.holding_percentage = self._convert_to_float(transaction.get("holding_percentage", 0))
-    #                 existing_transaction.realized_profit = self._convert_to_float(transaction.get("realized_profit", 0))
-    #                 existing_transaction.realized_profit_percentage = self._convert_to_float(transaction.get("realized_profit_percentage", 0))
-    #                 existing_transaction.time = formatted_time  # 更新時間戳
-                    
-    #                 session.commit()
-    #                 logger.info(f"成功更新交易 {signature}")
-    #                 return True
-    #             else:
-    #                 # 如果交易不存在，創建新記錄
-    #                 new_transaction = Transaction(
-    #                     wallet_address=wallet_address,
-    #                     wallet_balance=transaction.get("wallet_balance"),
-    #                     signature=signature,
-    #                     transaction_time=transaction.get("transaction_time"),
-    #                     transaction_type=transaction_type,
-    #                     token_address=token_address,
-    #                     token_name=transaction.get("token_name"),
-    #                     token_icon=transaction.get("token_icon"),
-    #                     marketcap=transaction.get("marketcap"),
-    #                     amount=self._convert_to_float(transaction.get("amount")),
-    #                     value=self._convert_to_float(transaction.get("value")),
-    #                     price=self._convert_to_float(transaction.get("price")),
-    #                     holding_percentage=self._convert_to_float(transaction.get("holding_percentage", 0)),
-    #                     realized_profit=self._convert_to_float(transaction.get("realized_profit", 0)),
-    #                     realized_profit_percentage=self._convert_to_float(transaction.get("realized_profit_percentage", 0)),
-    #                     chain=transaction.get("chain", "SOLANA"),
-    #                     from_token_address=from_token_address,
-    #                     from_token_symbol=transaction.get("from_token_symbol"),
-    #                     from_token_amount=self._convert_to_float(transaction.get("from_token_amount")),
-    #                     dest_token_address=dest_token_address,
-    #                     dest_token_symbol=transaction.get("dest_token_symbol"),
-    #                     dest_token_amount=self._convert_to_float(transaction.get("dest_token_amount")),
-    #                     time=formatted_time
-    #                 )
-                
-    #             session.add(new_transaction)
-    #             session.commit()
-    #             logger.info(f"成功新增交易 {signature} 到資料庫")
-    #             return True
+    #             except sqlalchemy.exc.IntegrityError as e:
+    #                 # 在內部捕獲並處理完整性錯誤
+    #                 session.rollback()
+    #                 if "duplicate key value violates unique constraint" in str(e):
+    #                     logger.info(f"交易已存在，無需重複插入: {signature}")
+    #                     return True  # 視為成功
+    #                 else:
+    #                     logger.error(f"保存交易時出現完整性錯誤: {e}")
+    #                     return False
                 
     #     except Exception as e:
     #         logger.exception(f"保存/更新交易 {signature} 時發生錯誤: {e}")
     #         return False
+
+    async def save_transaction(self, transaction: Dict[str, Any]) -> bool:
+        try:
+            signature = transaction.get("signature")
+            transaction_time = transaction.get("transaction_time")
+            if not signature:
+                logger.error("保存交易失敗: 缺少簽名")
+                return False
+        
+            with self.session_factory() as session:
+                try:
+                    # 查詢是否存在相同signature和transaction_time的交易
+                    query = select(Transaction).where(
+                        and_(
+                            Transaction.signature == signature,
+                            Transaction.transaction_time == transaction.get("transaction_time")
+                        )
+                    )
+                    existing_transaction = session.execute(query).scalars().first()
+                    
+                    # 獲取所有需要的代幣信息
+                    token_address = transaction.get("token_address")
+                    from_token_address = transaction.get("from_token_address")
+                    dest_token_address = transaction.get("dest_token_address")
+                    wallet_address = transaction.get("wallet_address")
+                    
+                    # 先檢查錢包餘額緩存
+                    cache_key = f"wallet_sol_balance:{wallet_address}"
+                    cached_balance = await cache_service.get(cache_key)
+                    
+                    if cached_balance is not None:
+                        wallet_balance = self._convert_to_float(cached_balance)
+                        logger.debug(f"使用緩存的錢包餘額: {wallet_address} = {wallet_balance} SOL")
+                    else:
+                        # 緩存未命中，調用RPC獲取餘額
+                        try:
+                            sol_balance_result = await self.get_sol_balance(wallet_address)
+                            if sol_balance_result and sol_balance_result.get("balance"):
+                                wallet_balance = sol_balance_result.get("balance", {}).get("float", 0)
+                                # 將餘額緩存 5 分鐘 (300秒)
+                                await cache_service.set(cache_key, wallet_balance, expiry=300)
+                                logger.debug(f"已緩存錢包餘額: {wallet_address} = {wallet_balance} SOL")
+                            else:
+                                logger.warning(f"無法獲取 {wallet_address} 的餘額，使用預設值 0")
+                                wallet_balance = 0
+                        except Exception as e:
+                            logger.error(f"獲取餘額時出錯: {e}")
+                            wallet_balance = transaction.get("wallet_balance", 0) or 0  # 嘗試使用傳入的值，否則使用0
+                    
+                    # 更新交易的錢包餘額
+                    transaction["wallet_balance"] = wallet_balance
+                    
+                    # 獲取代幣信息
+                    token_info = self.get_token_info_safely(token_address)
+                    from_token_info = self.get_token_info_safely(from_token_address)
+                    dest_token_info = self.get_token_info_safely(dest_token_address)
+                    
+                    # 更新交易數據
+                    if token_info:
+                        if "token_name" not in transaction or not transaction["token_name"]:
+                            transaction["token_name"] = token_info.get("symbol") or token_info.get("name")
+                        
+                        if "token_icon" not in transaction or not transaction["token_icon"]:
+                            transaction["token_icon"] = token_info.get("icon") or token_info.get("url")
+                        
+                        # 計算marketcap (如果有supply_float)
+                        if "marketcap" not in transaction or not transaction["marketcap"]:
+                            price = self._convert_to_float(transaction.get("price", 0))
+                            # 從token_info獲取supply_float，如果沒有則使用預設值
+                            supply_float = token_info.get("supply_float", 1000000000)  # 預設供應量為10億
+                            if price:  # 只要有價格就計算marketcap
+                                transaction["marketcap"] = price * supply_float
+                            else:
+                                transaction["marketcap"] = 0  # 如果沒有價格，marketcap設為0而不是null
+                    
+                    # 更新代幣符號
+                    if from_token_info and "from_token_symbol" not in transaction:
+                        transaction["from_token_symbol"] = from_token_info.get("symbol")
+                    
+                    if dest_token_info and "dest_token_symbol" not in transaction:
+                        transaction["dest_token_symbol"] = dest_token_info.get("symbol")
+
+                    # 計算holding_percentage - 使用剛獲取的wallet_balance
+                    transaction_type = transaction.get("transaction_type")
+                    amount = self._convert_to_float(transaction.get("amount", 0))
+                    value = self._convert_to_float(transaction.get("value", 0))
+                    
+                    if transaction_type == "buy" and value > 0:
+                        # 使用剛取得的wallet_balance計算持倉百分比
+                        holding_pct = value / (wallet_balance + value) * 100 if wallet_balance + value > 0 else 0
+                        transaction["holding_percentage"] = min(100, max(-100, holding_pct))
+                    elif transaction_type == "sell" and amount > 0:
+                        token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+                        current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
+                        if current_amount > 0:
+                            holding_pct = (amount / current_amount) * 100
+                            transaction["holding_percentage"] = min(100, max(-100, holding_pct))
+                        else:
+                            transaction["holding_percentage"] = 100
+                    
+                    # 計算realized_profit和realized_profit_percentage (只有賣出才有)
+                    if transaction_type == "sell":
+                        token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+                        avg_buy_price = self._convert_to_float(token_buy_data.get("avg_buy_price", 0))
+                        sell_price = self._convert_to_float(transaction.get("price", 0))
+                        
+                        if avg_buy_price > 0 and amount > 0:
+                            realized_profit, realized_profit_percentage = self.calculate_realized_profit(token_address, amount, sell_price, avg_buy_price)
+                            realized_profit_percentage = min(1000, max(-100, realized_profit_percentage))
+                            transaction["realized_profit"] = realized_profit
+                            transaction["realized_profit_percentage"] = realized_profit_percentage
+                        else:
+                            logger.warning(f"無法計算利潤: avg_buy_price={avg_buy_price}, amount={amount}")
+                            transaction["realized_profit"] = 0
+                            transaction["realized_profit_percentage"] = 0
+                    else:
+                        # 買入時這些值為0
+                        transaction["realized_profit"] = 0
+                        transaction["realized_profit_percentage"] = 0
+
+                    time = datetime.now(tz_utc8)
+                    formatted_time = time.strftime('%Y-%m-%d %H:%M:%S.%f')
+
+                    # 買入交易時更新 TokenBuyData
+                    if transaction_type == "buy" and amount > 0 and price > 0:
+                        token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+                        current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
+                        current_value = self._convert_to_float(token_buy_data.get("total_value", 0))
+                        
+                        # 計算新的總數量和總值
+                        new_amount = current_amount + amount
+                        new_value = current_value + (amount * price)
+                        
+                        # 計算新的平均買入價格
+                        if new_amount > 0:
+                            avg_buy_price = new_value / new_amount
+                        else:
+                            avg_buy_price = 0
+                            
+                        # 更新 TokenBuyData
+                        buy_data = {
+                            "total_amount": new_amount,
+                            "total_value": new_value,
+                            "avg_buy_price": avg_buy_price,
+                            "last_buy_time": transaction.get("transaction_time"),
+                            "last_price": price
+                        }
+                        self.update_token_buy_data(wallet_address, token_address, buy_data)
+                    
+                    # 賣出交易時更新 TokenBuyData
+                    elif transaction_type == "sell" and amount > 0 and price > 0:
+                        token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+                        current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
+                        current_value = self._convert_to_float(token_buy_data.get("total_value", 0))
+                        avg_buy_price = self._convert_to_float(token_buy_data.get("avg_buy_price", 0))
+                        
+                        # 確保有買入記錄
+                        if current_amount > 0 and avg_buy_price > 0:
+                            # 計算賣出後剩餘數量和價值
+                            remaining_amount = max(0, current_amount - amount)
+                            
+                            if current_amount > 0:
+                                # 按比例減少價值
+                                value_reduction = (amount / current_amount) * current_value
+                                remaining_value = max(0, current_value - value_reduction)
+                            else:
+                                remaining_value = 0
+                            
+                            # 更新平均買入價格（如果還有剩餘代幣）
+                            if remaining_amount > 0:
+                                new_avg_buy_price = remaining_value / remaining_amount
+                            else:
+                                new_avg_buy_price = 0
+                            
+                            # 更新 TokenBuyData
+                            buy_data = {
+                                "total_amount": remaining_amount,
+                                "total_value": remaining_value,
+                                "avg_buy_price": new_avg_buy_price,
+                                "last_price": price
+                            }
+                            self.update_token_buy_data(wallet_address, token_address, buy_data)
+
+                    # 如果交易已存在，則更新它
+                    if existing_transaction:
+                        # 更新現有記錄的各個欄位
+                        existing_transaction.wallet_balance = wallet_balance
+                        existing_transaction.token_name = transaction.get("token_name")
+                        existing_transaction.token_icon = transaction.get("token_icon")
+                        existing_transaction.value = self._convert_to_float(transaction.get("value"))
+                        existing_transaction.price = self._convert_to_float(transaction.get("price"))
+                        existing_transaction.marketcap = transaction.get("marketcap")
+                        existing_transaction.from_token_symbol = transaction.get("from_token_symbol")
+                        existing_transaction.dest_token_symbol = transaction.get("dest_token_symbol")
+                        existing_transaction.holding_percentage = self._convert_to_float(transaction.get("holding_percentage", 0))
+                        existing_transaction.realized_profit = self._convert_to_float(transaction.get("realized_profit", 0))
+                        existing_transaction.realized_profit_percentage = self._convert_to_float(transaction.get("realized_profit_percentage", 0))
+                        existing_transaction.time = formatted_time  # 更新時間戳
+                        
+                        session.commit()
+                        return True
+                    else:
+                        # 如果交易不存在，創建新記錄
+                        new_transaction = Transaction(
+                            wallet_address=wallet_address,
+                            wallet_balance=wallet_balance,
+                            signature=signature,
+                            transaction_time=transaction.get("transaction_time"),
+                            transaction_type=transaction_type,
+                            token_address=token_address,
+                            token_name=transaction.get("token_name"),
+                            token_icon=transaction.get("token_icon"),
+                            marketcap=transaction.get("marketcap"),
+                            amount=self._convert_to_float(transaction.get("amount")),
+                            value=self._convert_to_float(transaction.get("value")),
+                            price=self._convert_to_float(transaction.get("price")),
+                            holding_percentage=self._convert_to_float(transaction.get("holding_percentage", 0)),
+                            realized_profit=self._convert_to_float(transaction.get("realized_profit", 0)),
+                            realized_profit_percentage=self._convert_to_float(transaction.get("realized_profit_percentage", 0)),
+                            chain=transaction.get("chain", "SOLANA"),
+                            from_token_address=from_token_address,
+                            from_token_symbol=transaction.get("from_token_symbol"),
+                            from_token_amount=self._convert_to_float(transaction.get("from_token_amount")),
+                            dest_token_address=dest_token_address,
+                            dest_token_symbol=transaction.get("dest_token_symbol"),
+                            dest_token_amount=self._convert_to_float(transaction.get("dest_token_amount")),
+                            time=formatted_time
+                        )
+                        session.add(new_transaction)
+                        session.commit()
+                        return True
+                    
+                except sqlalchemy.exc.IntegrityError as e:
+                    # 在內部捕獲並處理完整性錯誤
+                    session.rollback()
+                    if "duplicate key value violates unique constraint" in str(e):
+                        logger.info(f"交易已存在，無需重複插入: {signature}")
+                        return True  # 視為成功
+                    else:
+                        logger.error(f"保存交易時出現完整性錯誤: {e}")
+                        return False
+                
+        except Exception as e:
+            logger.exception(f"保存/更新交易 {signature} 時發生錯誤: {e}")
+            return False
         
     async def update_wallet_holdings(self, wallet_address: str, token_stats: Dict[str, Any]) -> bool:
         """
@@ -2276,6 +2460,87 @@ class TransactionProcessor:
         
         except Exception as e:
             logger.exception(f"更新持倉記錄時發生錯誤: {str(e)}")
+            return False
+        
+    def update_token_buy_data(self, wallet_address: str, token_address: str, buy_data: Dict) -> bool:
+        """更新代幣購買數據"""
+        db_ready = self._init_db_connection()
+        if not db_ready:
+            logger.error(f"無法更新 {wallet_address}/{token_address} 購買數據，因數據庫未就緒")
+            return False
+
+        try:
+            # 調試日誌，記錄詳細信息
+            logger.info(f"更新代幣購買數據: 地址={wallet_address}, 代幣={token_address}, 數據={buy_data}")
+            
+            amount = Decimal(str(buy_data.get("amount", 0)))
+            cost = Decimal(str(buy_data.get("cost", 0)))
+            is_buy = buy_data.get("is_buy", True)
+            
+            # 更多調試信息
+            logger.info(f"解析後數據: amount={amount}, cost={cost}, is_buy={is_buy}")
+
+            with self.session_factory() as session:
+                query = session.execute(
+                    select(TokenBuyData).where(
+                        (TokenBuyData.wallet_address == wallet_address) &
+                        (TokenBuyData.token_address == token_address)
+                    ).with_for_update()
+                )
+                buy_record = query.scalars().first()
+
+                if buy_record:
+                    # 記錄現有數據
+                    logger.info(f"找到現有記錄: 總量={buy_record.total_amount}, 總成本={buy_record.total_cost}")
+                    
+                    current_amount = Decimal(str(buy_record.total_amount or 0.0))
+                    current_cost = Decimal(str(buy_record.total_cost or 0.0))
+                    
+                    new_total_amount = current_amount + amount
+                    # 只有買入時才更新成本
+                    new_total_cost = current_cost + (cost if is_buy else Decimal(0))
+                    
+                    logger.info(f"計算新值: 新總量={new_total_amount}, 新總成本={new_total_cost}")
+                    
+                    buy_record.total_amount = float(new_total_amount)
+                    buy_record.total_cost = float(new_total_cost)
+                    buy_record.updated_at = datetime.now()
+                    
+                    if new_total_amount > 0:
+                        if new_total_cost > 0:
+                            buy_record.avg_buy_price = float(new_total_cost / new_total_amount)
+                            logger.info(f"更新平均買入價: {buy_record.avg_buy_price}")
+                        else:
+                            buy_record.avg_buy_price = 0.0
+                    else:
+                        buy_record.avg_buy_price = 0.0
+                        if new_total_amount == 0:
+                            buy_record.total_cost = 0.0
+                else:
+                    logger.info(f"未找到現有記錄，準備創建新記錄")
+                    # 只有買入或者正數金額時才創建記錄
+                    if is_buy or amount > 0:
+                        logger.info(f"創建新記錄: 買入={is_buy}, 數量={amount}")
+                        avg_price = cost / amount if amount != 0 else Decimal(0)
+                        new_record = TokenBuyData(
+                            wallet_address=wallet_address,
+                            token_address=token_address,
+                            total_amount=float(amount),
+                            total_cost=float(cost),
+                            avg_buy_price=float(avg_price),
+                            updated_at=datetime.now()
+                        )
+                        session.add(new_record)
+                        logger.info(f"新記錄已添加到會話")
+                    else:
+                        logger.warning(f"跳過創建記錄: 非買入交易且金額不為正數: {wallet_address}/{token_address} 數量={amount}")
+
+                session.commit()
+                logger.info(f"交易已提交到數據庫")
+                return True
+
+        except Exception as e:
+            logger.exception(f"更新 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
             return False
         
     async def update_wallet_summary(self, wallet_address: str) -> bool:

@@ -1,12 +1,14 @@
-from fastapi import FastAPI, Request
-from fastapi.middleware.cors import CORSMiddleware
 import logging
 import time
+from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.services.wallet_analyzer import wallet_analyzer
 from app.api.router import router
 from app.core.config import settings
 from app.services.transaction_processor import transaction_processor
+from app.services.kafka_consumer import kafka_consumer
+from app.services.kafka_processor import message_processor
 
 # 配置日誌
 logging.basicConfig(
@@ -48,6 +50,27 @@ async def lifespan(app: FastAPI):
         logger.error(f"初始化交易處理器時發生錯誤: {e}")
         logger.warning("初始化問題不會阻止應用啟動，但某些功能可能無法正常工作")
     
+    # 初始化 Kafka 消費者
+    try:
+        logger.info("初始化 Kafka 消費者...")
+        kafka_start_result = await kafka_consumer.start()
+        if kafka_start_result:
+            logger.info("Kafka 消費者服務已成功啟動")
+        else:
+            logger.warning("Kafka 消費者服務啟動失敗，但應用程式仍會繼續啟動")
+    except Exception as e:
+        logger.error(f"初始化 Kafka 消費者時發生錯誤: {e}")
+        logger.warning("Kafka 消費者初始化問題不會阻止應用啟動，但即時交易更新功能可能無法正常工作")
+
+    # 初始化消息處理器
+    try:
+        logger.info("初始化消息處理器...")
+        await message_processor.start()
+        logger.info("消息處理器已成功啟動")
+    except Exception as e:
+        logger.error(f"初始化消息處理器時發生錯誤: {e}")
+        logger.warning("消息處理器初始化問題不會阻止應用啟動，但消息處理功能可能無法正常工作")
+    
     # 日誌所有路由
     routes = []
     for r in router.routes:
@@ -64,7 +87,23 @@ async def lifespan(app: FastAPI):
     # 關閉時執行的操作
     logger.info("Shutting down the application...")
     
-    # 先關閉 wallet_analyzer 的所有任務
+    # 先關閉消息處理器
+    try:
+        logger.info("正在關閉消息處理器...")
+        await message_processor.stop()
+        logger.info("消息處理器已成功關閉")
+    except Exception as e:
+        logger.error(f"關閉消息處理器時發生錯誤: {e}")
+    
+    # 關閉 Kafka 消費者
+    try:
+        logger.info("正在關閉 Kafka 消費者...")
+        await kafka_consumer.stop()
+        logger.info("Kafka 消費者已成功關閉")
+    except Exception as e:
+        logger.error(f"關閉 Kafka 消費者時發生錯誤: {e}")
+    
+    # 關閉 wallet_analyzer
     try:
         import asyncio
         from asyncio import wait_for
@@ -78,7 +117,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"關閉 wallet_analyzer 時發生錯誤: {e}")
 
-    # 然後關閉數據庫連接
+    # 關閉數據庫連接
     try:
         logger.info("正在關閉資料庫連接...")
         transaction_processor.close_db_connection()

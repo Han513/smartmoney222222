@@ -26,9 +26,8 @@ TEST_WALLET = "4t9bWuZsXXKGMgmd96nFD4KWxyPNTsPm4q9jEMH4jD2i"  # 一個公開的S
 # 定義要測試的RPC端點
 DEFAULT_RPC_ENDPOINTS = [
     "https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc",
-    "https://radial-nameless-feather.solana-mainnet.quiknode.pro/609be45a63a9c900ddb4408fdb140aee21f82213",
-    "https://api.mainnet-beta.solana.com",
-    "https://solana-api.projectserum.com"
+    "https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/",
+    "https://api.mainnet-beta.solana.com"
 ]
 
 async def test_rpc_connection(url: str) -> dict:
