@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     CELERY_TIMEZONE: str = "UTC"
 
     # Kafka 配置
-    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("127.0.0.1:8998", "localhost:8998")
-    KAFKA_TOPIC: str = os.getenv("web3_trade_events", "web3_trade_events")
-    KAFKA_GROUP_ID: str = os.getenv("KAFKA_GROUP_ID", "wallet_analyzer_group")
+    KAFKA_BOOTSTRAP_SERVERS: str = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "kafka-node2:9792")
+    KAFKA_TOPIC: str = os.getenv("KAFKA_TOPICS", "web3_trade_sm_events")
+    KAFKA_GROUP_ID: str = os.getenv("KAFKA_GROUP_ID", "web3_trade_sm_events")
     
     # 安全配置 - 移除 API_KEYS
     SECRET_KEY: str = Field(default="your-secret-key-here")
@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     CORS_ORIGINS: List[str] = ["*"]
     
     # 資料庫配置 - 使用您提供的 DATABASE_URI_Solana
-    DATABASE_URL: str = "postgresql://postgres:henrywork8812601@localhost:5432/smartmoney"
+    DATABASE_URL: str = os.getenv("DATABASE_URI_Solana", "DATABASE_URL_SYNC")
     
     # 資料庫功能開關
     DB_ENABLED: bool = True
@@ -52,7 +52,9 @@ class Settings(BaseSettings):
     # Solscan API 配置
     SOLSCAN_API_TOKEN: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M"
     SOLSCAN_API_URL: str = "https://pro-api.solscan.io/v2.0"
-    
+
+    WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://moonx.backend:4200/internal/sync_kol_wallets")
+
     # 系統限制
     MAX_CONCURRENT_REQUESTS: int = 10
     MAX_ADDRESSES_PER_REQUEST: int = 300

@@ -1,0 +1,38 @@
+# 使用Python 3.9作為基礎鏡像，確保與aiokafka兼容
+FROM python:3.9-slim
+
+# 設置工作目錄
+WORKDIR /app
+
+# 設置Python環境
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app
+
+# 安裝系統依賴
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    libpq-dev \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# 複製requirements.txt
+COPY requirements.txt .
+
+# 先安裝 kafka-python，指定一個能與 aiokafka 相容的版本
+RUN pip install --no-cache-dir kafka-python==2.0.2
+# 然後安裝其他依賴
+RUN pip install --no-cache-dir -r requirements.txt
+
+# 複製應用程式代碼
+COPY . .
+
+# 設置健康檢查
+HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
+    CMD curl -f http://localhost:8070/health || exit 1
+
+# 對外暴露端口
+EXPOSE 8070
+
+# 啟動FastAPI應用
+CMD ["python", "run.py"]

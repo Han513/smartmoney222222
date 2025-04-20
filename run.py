@@ -34,6 +34,21 @@ def force_exit(signum=None, frame=None):
 # 設置 SIGINT 處理
 def handle_sigint(signum, frame):
     logger.info("接收到中斷信號，正在優雅關閉...")
+    try:
+        import subprocess
+        import os
+        import signal
+        
+        # 向進程組發送信號
+        os.killpg(os.getpgid(0), signal.SIGTERM)
+        
+        logger.info("嘗試終止所有 Celery worker 進程...")
+        subprocess.run("pkill -f 'celery worker'", shell=True)
+    except Exception as e:
+        logger.error(f"終止進程失敗: {e}")
+    
+    # 強制退出
+    force_exit()
     
     # 立即嘗試終止所有 Celery worker 進程
     try:

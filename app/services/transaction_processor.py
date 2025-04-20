@@ -19,7 +19,7 @@ from app.services.solscan import solscan_client
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 from app.services.cache_service import cache_service
-
+from app.services.wallet_summary_service import wallet_summary_service
 
 # 設置 Decimal 精度
 getcontext().prec = 28
@@ -514,6 +514,9 @@ class TransactionProcessor:
         logger.info(f"處理錢包 {wallet_address} 的 {len(activities)} 筆活動")
         
         if not activities:
+            logger.info(f"錢包 {wallet_address} 沒有活動記錄，創建空摘要")
+            from app.services.wallet_summary_service import wallet_summary_service
+            await wallet_summary_service.create_empty_wallet_summary(wallet_address)
             return []
         
         start_time = time.time()
@@ -2554,50 +2557,50 @@ class TransactionProcessor:
         
         try:
             with self.session_factory() as session:
-                # 查詢現有記錄
-                wallet_summary = session.execute(
-                    select(WalletSummary).where(WalletSummary.address == wallet_address)
-                ).scalar_one_or_none()
+                # wallet_summary = session.execute(
+                #     select(WalletSummary).where(WalletSummary.address == wallet_address)
+                # ).scalar_one_or_none()
                 
-                # 獲取錢包餘額
-                balance_data = await self.get_sol_balance(wallet_address)
-                balance = balance_data.get("balance", {}).get("int", 0)
-                balance_usd = balance_data.get("balance", {}).get("float", 0)  # 這裡已經是 USD 值
+                # # 獲取錢包餘額
+                # balance_data = await self.get_sol_balance(wallet_address)
+                # balance = balance_data.get("balance", {}).get("int", 0)
+                # balance_usd = balance_data.get("balance", {}).get("float", 0)  # 這裡已經是 USD 值
                 
-                # 預設值設定
-                summary_data = {
-                    "address": wallet_address,
-                    "balance": balance,
-                    "balance_USD": balance_usd,
-                    "chain": "SOLANA",
-                    "tag": None,
-                    "twitter_name": None,
-                    "twitter_username": None,
-                    "is_smart_wallet": False,
-                    "wallet_type": 0,
-                    "is_active": True,
-                }
+                # # 預設值設定
+                # summary_data = {
+                #     "address": wallet_address,
+                #     "balance": balance,
+                #     "balance_USD": balance_usd,
+                #     "chain": "SOLANA",
+                #     "tag": None,
+                #     "twitter_name": None,
+                #     "twitter_username": None,
+                #     "is_smart_wallet": False,
+                #     "wallet_type": 0,
+                #     "is_active": True,
+                # }
                 
                 # 獲取交易數據統計
                 tx_stats = await self._calculate_wallet_transaction_stats(wallet_address, session)
-                if tx_stats:
-                    summary_data.update(tx_stats)
+                return await wallet_summary_service.update_full_summary(wallet_address, tx_stats)
+                # if tx_stats:
+                #     summary_data.update(tx_stats)
                 
-                # 如果記錄已存在則更新，否則創建新記錄
-                if wallet_summary:
-                    logger.info(f"更新錢包 {wallet_address} 的現有摘要記錄")
-                    for key, value in summary_data.items():
-                        setattr(wallet_summary, key, value)
-                    wallet_summary.update_time = datetime.now()
-                else:
-                    logger.info(f"創建錢包 {wallet_address} 的新摘要記錄")
-                    summary_data["update_time"] = datetime.now()
-                    wallet_summary = WalletSummary(**summary_data)
-                    session.add(wallet_summary)
+                # # 如果記錄已存在則更新，否則創建新記錄
+                # if wallet_summary:
+                #     logger.info(f"更新錢包 {wallet_address} 的現有摘要記錄")
+                #     for key, value in summary_data.items():
+                #         setattr(wallet_summary, key, value)
+                #     wallet_summary.update_time = datetime.now()
+                # else:
+                #     logger.info(f"創建錢包 {wallet_address} 的新摘要記錄")
+                #     summary_data["update_time"] = datetime.now()
+                #     wallet_summary = WalletSummary(**summary_data)
+                #     session.add(wallet_summary)
                 
-                session.commit()
-                logger.info(f"成功更新錢包 {wallet_address} 的摘要記錄")
-                return True
+                # session.commit()
+                # logger.info(f"成功更新錢包 {wallet_address} 的摘要記錄")
+                # return True
                 
         except Exception as e:
             logger.exception(f"更新錢包摘要時發生錯誤: {e}")
@@ -2731,9 +2734,9 @@ class TransactionProcessor:
                         token_pnl_percentages.append(pnl_percentage)
                 
                 # 計算PNL分佈
-                lt50_count = sum(1 for p in token_pnl_percentages if p < 0)  # 小於0的（虧損）
-                from0to50_count = sum(1 for p in token_pnl_percentages if 0 <= p <= 50)  # 0-50%
-                from50to200_count = sum(1 for p in token_pnl_percentages if 50 < p <= 200)  # 50-200%
+                lt50_count = sum(1 for p in token_pnl_percentages if p < -50)  # 小於0的（虧損）
+                from0to50_count = sum(1 for p in token_pnl_percentages if -50 <= p <= 0)  # 0-50%
+                from50to200_count = sum(1 for p in token_pnl_percentages if 0 < p <= 200)  # 50-200%
                 from200to500_count = sum(1 for p in token_pnl_percentages if 200 < p <= 500)  # 200-500%
                 gt500_count = sum(1 for p in token_pnl_percentages if p > 500)  # 大於500%
 
@@ -2748,7 +2751,7 @@ class TransactionProcessor:
                 if total_count > 0:
                     stats[f"distribution_lt50_percentage_{period}"] = (lt50_count / total_count) * 100
                     stats[f"distribution_0to50_percentage_{period}"] = (from0to50_count / total_count) * 100
-                    stats[f"distribution_0to200_percentage_{period}"] = ((from50to200_count - from0to50_count) / total_count) * 100
+                    stats[f"distribution_0to200_percentage_{period}"] = (from50to200_count / total_count) * 100
                     stats[f"distribution_200to500_percentage_{period}"] = (from200to500_count / total_count) * 100
                     stats[f"distribution_gt500_percentage_{period}"] = (gt500_count / total_count) * 100
                 else:

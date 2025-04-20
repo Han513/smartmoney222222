@@ -153,6 +153,119 @@ def process_wallet_batch(self, request_id, addresses, time_range=7, include_metr
 
     return {"batch_index": batch_index, "tasks": results}
 
+@celery_app.task(name="remove_wallet_data_batch", bind=True)
+def remove_wallet_data_batch(self, request_id, addresses, batch_index=0, chain="SOLANA"):
+    """处理一批钱包地址的删除任务"""
+    from sqlalchemy import delete
+    from app.models.models import WalletSummary, Holding, Transaction, TokenBuyData
+    from app.core.db import get_session_factory
+    from app.services.cache_service import cache_service
+    
+    start_time = time.time()
+    total_wallets = len(addresses)
+    logger.info(f"==== 開始處理批次 {batch_index} 的刪除任務, 包含 {total_wallets} 個地址，請求ID: {request_id} ====")
+    
+    # 确保链名称是大写的
+    chain = chain.upper()
+    
+    # 获取数据库会话
+    session_factory = get_session_factory()
+    
+    results = []
+    for address in addresses:
+        try:
+            with session_factory() as session:
+                # 删除 TokenBuyData 记录
+                token_buy_deleted = session.execute(
+                    delete(TokenBuyData).where(
+                        TokenBuyData.wallet_address == address
+                    )
+                ).rowcount
+                
+                # 删除 Transaction 记录
+                transaction_deleted = session.execute(
+                    delete(Transaction).where(
+                        Transaction.wallet_address == address,
+                        Transaction.chain == chain
+                    )
+                ).rowcount
+                
+                # 删除 Holding 记录
+                holding_deleted = session.execute(
+                    delete(Holding).where(
+                        Holding.wallet_address == address,
+                        Holding.chain == chain
+                    )
+                ).rowcount
+                
+                # 删除 WalletSummary 记录
+                wallet_summary_deleted = session.execute(
+                    delete(WalletSummary).where(
+                        WalletSummary.address == address,
+                        WalletSummary.chain == chain
+                    )
+                ).rowcount
+                
+                # 提交事务
+                session.commit()
+                
+                # 删除缓存
+                run_async_task(cache_service.delete(f"wallet:{chain}:{address}"))
+                run_async_task(cache_service.delete(f"processing:{chain}:{address}"))
+                
+                logger.info(f"已删除钱包 {address} 的数据: WalletSummary={wallet_summary_deleted}, Holding={holding_deleted}, Transaction={transaction_deleted}, TokenBuyData={token_buy_deleted}")
+                
+                # 更新请求状态
+                async def update_req_status():
+                    # 获取当前请求状态
+                    req_status = await cache_service.get(f"req:{request_id}")
+                    if req_status:
+                        # 更新状态
+                        if address in req_status.get("pending_addresses", []):
+                            req_status["pending_addresses"].remove(address)
+                        
+                        # 确保ready_results存在
+                        if "ready_results" not in req_status:
+                            req_status["ready_results"] = {}
+                        
+                        # 添加结果
+                        req_status["ready_results"][address] = {
+                            "address": address,
+                            "status": "removed",
+                            "last_updated": int(time.time())
+                        }
+                        
+                        # 保存更新后的状态
+                        await cache_service.set(f"req:{request_id}", req_status, expiry=3600)
+                
+                run_async_task(update_req_status())
+                
+                results.append({
+                    "address": address, 
+                    "status": "success",
+                    "deleted_records": {
+                        "wallet_summary": wallet_summary_deleted,
+                        "holding": holding_deleted,
+                        "transaction": transaction_deleted,
+                        "token_buy_data": token_buy_deleted
+                    }
+                })
+                
+        except Exception as e:
+            logger.exception(f"删除钱包 {address} 数据时出错: {str(e)}")
+            results.append({"address": address, "status": "error", "error": str(e)})
+    
+    end_time = time.time()
+    total_time = end_time - start_time
+    
+    logger.info(f"==== 批次 {batch_index} 刪除處理完成 ====")
+    logger.info(f"總處理時間: {total_time:.2f} 秒")
+    logger.info(f"處理錢包數: {total_wallets}")
+    logger.info(f"平均每個錢包耗時: {total_time/max(1, total_wallets):.2f} 秒")
+    logger.info(f"==============================")
+    
+    return {"batch_index": batch_index, "results": results}
+
 @celery_app.task
 def clean_expired_cache():
     """

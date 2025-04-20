@@ -1,0 +1,78 @@
+# Python 緩存文件
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 虛擬環境
+venv/
+env/
+ENV/
+.venv_py312/
+
+# IDE 文件
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# 日誌文件
+*.log
+logs/
+
+# 數據庫文件
+*.db
+*.sqlite3
+
+# Redis 數據
+dump.rdb
+
+# Celery 文件
+celerybeat-schedule
+celerybeat.pid
+
+# 測試覆蓋率報告
+.coverage
+htmlcov/
+
+# 本地配置文件
+.env.local
+.env.development.local
+.env.test.local
+.env.production.local
+
+# 臨時文件
+tmp/
+temp/
+
+# 緩存目錄
+.cache/
+.pytest_cache/
+
+# 輸出文件
+output/
+results/
+
+# 敏感信息
+secrets.json
+credentials.json
+
+# 特定於項目的文件
+node_modules/

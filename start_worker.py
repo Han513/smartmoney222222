@@ -4,10 +4,17 @@
 import os
 import sys
 from subprocess import call
+from dotenv import load_dotenv
+
+# 加載 .env 文件中的環境變量
+load_dotenv()
 
 # 強制設置環境變量
-os.environ["CELERY_BROKER_URL"] = "redis://127.0.0.1:6379/1"
-os.environ["CELERY_RESULT_BACKEND"] = "redis://127.0.0.1:6379/1"
+# os.environ["CELERY_BROKER_URL"] = "redis://127.0.0.1:6379/1"
+# os.environ["CELERY_RESULT_BACKEND"] = "redis://127.0.0.1:6379/1"
+
+# os.environ["CELERY_BROKER_URL"] = "redis://redis:6379/1"
+# os.environ["CELERY_RESULT_BACKEND"] = "redis://redis:6379/1"
 
 # 構建 Celery 啟動命令
 cmd = [
@@ -21,7 +28,7 @@ cmd = [
 
 # 啟動 worker
 print("啟動 Celery worker...")
-print(f"環境變量設置為: CELERY_BROKER_URL={os.environ['CELERY_BROKER_URL']}")
+print(f"環境變量設置為: CELERY_BROKER_URL={os.getenv('CELERY_BROKER_URL')}")
 print(f"命令: {' '.join(cmd)}")
 return_code = call(cmd)
 sys.exit(return_code) 

@@ -1,0 +1,103 @@
+version: '3.8'
+
+services:
+  # FastAPI 應用服務
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    container_name: smartmoney-api
+    restart: always
+    ports:
+      - "8070:8070"
+    depends_on:
+      - redis
+      - db
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://test_pg01_rwuser01:E2#dN4c6d5Mz@pgm-3nsj7dpddb23873d.pg.rds.aliyuncs.com:5432/smart_money
+      - REDIS_URL=redis://redis.local:6379/0
+      - CELERY_BROKER_URL=redis://redis.local:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis.local:6379/1
+      - API_TITLE=SmartMoney API
+      - API_DESCRIPTION=智能錢包分析API
+      - API_VERSION=1.0.0
+      - API_PREFIX=/api/v1
+      - DB_ENABLED=true
+      - ENVIRONMENT=testing
+      - SECRET_KEY=change_this_to_a_secure_random_string
+      - API_KEYS=test_api_key_1,test_api_key_2
+      - SOLSCAN_API_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M
+      - SOLSCAN_API_URL=https://pro-api.solscan.io/v2.0
+      - WALLET_SYNC_API_ENDPOINT=http://moonx.backend:4200/internal/sync_kol_wallets
+      - MAX_CONCURRENT_REQUESTS=100
+      - MAX_ADDRESSES_PER_REQUEST=300
+      - MAX_WORKER_PROCESSES=5
+      - CACHE_TTL_SECONDS=3600
+    volumes:
+      - ./:/app
+    networks:
+      - smartmoney-network
+    command: python run.py
+
+  # Celery worker 服務
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    container_name: smartmoney-worker
+    restart: always
+    depends_on:
+      - redis
+      - db
+      - api
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://test_pg01_rwuser01:E2#dN4c6d5Mz@pgm-3nsj7dpddb23873d.pg.rds.aliyuncs.com:5432/smart_money
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DB_ENABLED=true
+      - ENVIRONMENT=testing
+      - SOLSCAN_API_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M
+      - SOLSCAN_API_URL=https://pro-api.solscan.io/v2.0
+      - MAX_ADDRESSES_PER_REQUEST=300
+    volumes:
+      - ./:/app
+    networks:
+      - smartmoney-network
+    command: python start_worker.py
+
+  # Redis 服務 - 用於快取和消息佇列
+  redis:
+    image: redis:6.2-alpine
+    container_name: smartmoney-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - smartmoney-network
+
+  # PostgreSQL 數據庫
+  db:
+    image: postgres:13-alpine
+    container_name: smartmoney-db
+    restart: always
+    environment:
+      - POSTGRES_USER=test_pg01_rwuser01
+      - POSTGRES_PASSWORD=E2#dN4c6d5Mz
+      - POSTGRES_DB=smart_money
+    ports:
+      - "5433:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - smartmoney-network
+
+volumes:
+  redis-data:
+  postgres-data:
+
+networks:
+  smartmoney-network:
+    driver: bridge

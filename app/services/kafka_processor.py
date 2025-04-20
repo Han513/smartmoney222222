@@ -1,15 +1,14 @@
 # app/services/kafka_processor.py
-
+import json
 import asyncio
 import logging
 import time
 from typing import Dict, Any, List, Optional
 from datetime import datetime
-import json
-
 from app.core.config import settings
 from app.services.cache_service import cache_service
 from app.services.transaction_processor import transaction_processor
+from app.services.wallet_summary_service import wallet_summary_service
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +211,12 @@ class MessageProcessor:
             
             if save_result:
                 logger.info(f"成功保存交易: {txn_hash}")
+
+                await wallet_summary_service.increment_transaction_counts(
+                    wallet_address, 
+                    "buy" if is_buy else "sell",
+                    timestamp
+                )
                 
                 # 處理 TokenBuyData 已在 save_transaction 中處理過，無需重複處理
                 processing_time = time.time() - start_time
