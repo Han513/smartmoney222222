@@ -227,7 +227,7 @@ class WalletSyncService:
                 logger.warning("沒有找到需要同步的錢包信息")
                 return
                     
-            logger.info(f"成功獲取錢包數據 {wallet_data}，準備推送到外部 API")
+            # logger.info(f"成功獲取錢包數據 {wallet_data}，準備推送到外部 API")
                 
             # 推送到外部 API
             success = await self._push_to_api(wallet_data)
@@ -263,10 +263,22 @@ class WalletSyncService:
                 # 將錢包信息轉換為 API 所需格式
                 for wallet in wallet_summaries:
                     try:
+                        # 檢查是否有任何交易記錄
+                        has_transactions = (
+                            (wallet.total_transaction_num_30d or 0) > 0 or
+                            (wallet.total_transaction_num_7d or 0) > 0 or
+                            (wallet.total_transaction_num_1d or 0) > 0
+                        )
+                        
+                        # 如果沒有交易記錄，跳過這個錢包
+                        if not has_transactions:
+                            logger.info(f"錢包 {wallet.address} 沒有交易記錄，跳過推送")
+                            continue
+
                         # 創建新的字典，首先添加必填項
                         api_data = {
                             "address": wallet.address,
-                            "chain": wallet.chain.upper() if wallet.chain else "SOLANA",  # 確保鏈名稱大寫
+                            "chain": wallet.chain.upper() if wallet.chain else "SOLANA",
                             "last_transaction_time": wallet.last_transaction_time,
                             "isActive": wallet.is_active if wallet.is_active is not None else True,
                             "walletType": wallet.wallet_type if wallet.wallet_type is not None else 0
@@ -462,8 +474,8 @@ class WalletSyncService:
                             api_data["distribution_lt50_percentage_7d"] = wallet.distribution_lt50_percentage_7d
                         
                         # 添加更新時間
-                        if hasattr(wallet, "update_time") and wallet.update_time is not None:
-                            api_data["update_time"] = wallet.update_time.isoformat() if isinstance(wallet.update_time, (datetime, date)) else wallet.update_time
+                        # if hasattr(wallet, "update_time") and wallet.update_time is not None:
+                        #     api_data["update_time"] = wallet.update_time.isoformat() if isinstance(wallet.update_time, (datetime, date)) else wallet.update_time
                         
                         # 添加到結果列表
                         result.append(api_data)
@@ -479,7 +491,7 @@ class WalletSyncService:
                             "walletType": wallet.wallet_type if wallet.wallet_type is not None else 0
                         })
                 
-                logger.info(f"已將 {len(result)} 個錢包數據轉換為 API 所需格式")
+                logger.info(f"已將 {len(result)} 個有交易記錄的錢包數據轉換為 API 所需格式")
                 
                 # 記錄樣本數據
                 if result and len(result) > 0:

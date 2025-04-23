@@ -333,7 +333,7 @@ class WalletAnalyzer:
         time_range: int = 7,
         include_metrics: Optional[List[str]] = None,
         use_cache: bool = True,
-        chain: str = "solana"
+        chain: str = "SOLANA"
     ) -> Dict[str, Any]:
         """
         分析單個錢包，計算指標

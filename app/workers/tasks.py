@@ -59,24 +59,25 @@ def run_async_task(coro):
 
 # 处理单个钱包的任务
 @celery_app.task(name="process_single_wallet")
-def process_single_wallet(address, time_range=7, include_metrics=None, request_id=None):
+def process_single_wallet(address, time_range=7, include_metrics=None, request_id=None, chain="SOLANA"):
     """处理单个钱包分析的Celery任务"""
     from app.services.wallet_analyzer import wallet_analyzer
     from app.services.cache_service import cache_service
     
     try:
-        logger.info(f"开始处理钱包任务: {address}, 请求ID: {request_id}")
+        logger.info(f"开始处理钱包任务: {address}, 链: {chain}, 请求ID: {request_id}")
         start_time = time.time()
         
-        # 运行异步分析函数
+        # 运行异步分析函数，传入 chain 参数
         result = run_async_task(wallet_analyzer.analyze_wallet(
             address, 
             time_range=time_range,
-            include_metrics=include_metrics
+            include_metrics=include_metrics,
+            chain=chain  # 添加 chain 參數
         ))
         
-        # 更新缓存
-        run_async_task(cache_service.set(f"wallet:{address}", result, expiry=3600))
+        # 更新缓存，使用包含 chain 的键
+        run_async_task(cache_service.set(f"wallet:{chain}:{address}", result, expiry=3600))
         
         # 如果有请求ID，更新请求状态
         if request_id:
@@ -112,19 +113,20 @@ def process_single_wallet(address, time_range=7, include_metrics=None, request_i
         logger.exception(f"处理钱包 {address} 时出错: {str(e)}")
         return {"status": "error", "address": address, "error": str(e)}
     finally:
-        # 清理处理中标记
+        # 清理处理中标记，包含 chain
         async def cleanup_processing():
-            await cache_service.delete(f"processing:{address}")
+            await cache_service.delete(f"processing:{chain}:{address}")
         
         run_async_task(cleanup_processing())
 
 # 批量处理钱包的任务
 @celery_app.task(name="process_wallet_batch", bind=True)
-def process_wallet_batch(self, request_id, addresses, time_range=7, include_metrics=None, batch_index=0):
-    """处理一批钱包地址的Celery任务"""
+def process_wallet_batch(self, request_id, addresses, time_range=7, include_metrics=None, batch_index=0, chain="SOLANA"):
+    """處理一批錢包地址的Celery任務"""
     start_time = time.time()
     total_wallets = len(addresses)
     logger.info(f"==== 開始處理批次 {batch_index}, 包含 {total_wallets} 個地址，請求ID: {request_id} ====")
+    logger.info(f"處理鏈：{chain}")
     
     results = []
     # 为每个地址创建单独的任务
@@ -135,7 +137,8 @@ def process_wallet_batch(self, request_id, addresses, time_range=7, include_metr
             kwargs={
                 "time_range": time_range,
                 "include_metrics": include_metrics,
-                "request_id": request_id
+                "request_id": request_id,
+                "chain": chain  # 也需要將 chain 參數傳遞給 process_single_wallet
             },
             queue="wallet_tasks"
         )

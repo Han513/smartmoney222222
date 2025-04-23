@@ -20,6 +20,7 @@ from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 from app.services.cache_service import cache_service
 from app.services.wallet_summary_service import wallet_summary_service
+import aiohttp
 
 # 設置 Decimal 精度
 getcontext().prec = 28
@@ -70,23 +71,91 @@ class TransactionProcessor:
             "icon": "..."
         }
     }
+        self.event_queue_key = "smart_token_events_queue"
+        self.api_endpoint = "http://172.25.183.205:4200/internal/smart_token_event"
+        self.event_batch_size = 50  # 批量發送的最大數量
+        self.event_process_interval = 5.0  # 處理間隔（秒）
+        self.event_processor_task = None
+        self.running = False
+        self.pending_events = []  # 待發送的事件列表
+        self.last_send_time = time.time()
     
     def activate(self):
-        """
-        激活交易处理器，标记为已激活
-        """
+        """激活交易處理器，啟動事件處理循環"""
         if self._activated:
-            logger.info("TransactionProcessor 已经被激活")
+            logger.info("TransactionProcessor 已經被激活")
             return True
         
         logger.info("激活 TransactionProcessor...")
         self._activated = True
         self._init_db_connection()
         
+        # 啟動事件處理循環
+        self.running = True
+        self.event_processor_task = asyncio.create_task(self._process_events_loop())
+        
         if not self.db_enabled:
             logger.warning("数据库功能未启用")
         return True
-    
+
+    async def stop(self):
+        """停止事件處理循環"""
+        self.running = False
+        if self.event_processor_task:
+            self.event_processor_task.cancel()
+            try:
+                await self.event_processor_task
+            except asyncio.CancelledError:
+                pass
+        # 發送剩餘的事件
+        if self.pending_events:
+            await self._send_events_batch(self.pending_events)
+            self.pending_events = []
+
+    async def _process_events_loop(self):
+        """事件處理循環 - 定時發送批量事件"""
+        try:
+            while self.running:
+                current_time = time.time()
+                time_since_last_send = current_time - self.last_send_time
+
+                # 檢查是否需要發送事件（達到時間間隔或數量閾值）
+                if (len(self.pending_events) >= self.event_batch_size or 
+                    (self.pending_events and time_since_last_send >= self.event_process_interval)):
+                    await self._send_events_batch(self.pending_events)
+                    self.pending_events = []
+                    self.last_send_time = current_time
+
+                await asyncio.sleep(0.1)  # 短暫休息避免CPU過載
+
+        except asyncio.CancelledError:
+            logger.info("事件處理循環被取消")
+            raise
+        except Exception as e:
+            logger.exception(f"事件處理循環發生錯誤: {e}")
+
+    async def _send_events_batch(self, events: List[Dict[str, Any]]):
+        """批量發送事件到API"""
+        if not events:
+            return
+
+        try:
+            logger.info(f"開始批量發送 {len(events)} 個事件")
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    self.api_endpoint,
+                    json=events,
+                    headers={"Content-Type": "application/json"},
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as response:
+                    if response.status == 200:
+                        logger.info(f"成功發送 {len(events)} 個事件")
+                    else:
+                        response_text = await response.text()
+                        logger.error(f"批量發送事件失敗: {response.status}, {response_text}")
+        except Exception as e:
+            logger.error(f"批量發送事件時發生錯誤: {str(e)}")
+
     def _init_db_connection(self) -> bool:
         """
         确保DB连接就绪: 检查激活状态，首次需要时创建引擎/工厂并测试连接
@@ -235,279 +304,6 @@ class TransactionProcessor:
         except Exception as e:
             logger.exception(f"獲取 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
             return {}
-
-    # def update_token_buy_data(self, wallet_address: str, token_address: str, buy_data: Dict) -> bool:
-    #     """更新代幣購買數據"""
-    #     db_ready = self._init_db_connection()
-    #     if not db_ready:
-    #         logger.error(f"無法更新 {wallet_address}/{token_address} 購買數據，因數據庫未就緒")
-    #         return False
-
-    #     try:
-    #         amount = Decimal(str(buy_data.get("amount", 0)))
-    #         cost = Decimal(str(buy_data.get("cost", 0)))
-    #         is_buy = buy_data.get("is_buy", True)
-
-    #         with self.session_factory() as session:
-    #             query = session.execute(
-    #                 select(TokenBuyData).where(
-    #                     (TokenBuyData.wallet_address == wallet_address) &
-    #                     (TokenBuyData.token_address == token_address)
-    #                 ).with_for_update()
-    #             )
-    #             buy_record = query.scalars().first()
-
-    #             if buy_record:
-    #                 current_amount = Decimal(str(buy_record.total_amount or 0.0))
-    #                 current_cost = Decimal(str(buy_record.total_cost or 0.0))
-                    
-    #                 new_total_amount = current_amount + amount
-    #                 new_total_cost = current_cost + (cost if is_buy else Decimal(0))
-                    
-    #                 buy_record.total_amount = float(new_total_amount)
-    #                 buy_record.total_cost = float(new_total_cost)
-    #                 buy_record.updated_at = datetime.now()
-                    
-    #                 if new_total_amount > 0:
-    #                     if new_total_cost > 0:
-    #                         buy_record.avg_buy_price = float(new_total_cost / new_total_amount)
-    #                     else:
-    #                         buy_record.avg_buy_price = 0.0
-    #                 else:
-    #                     buy_record.avg_buy_price = 0.0
-    #                     if new_total_amount == 0:
-    #                         buy_record.total_cost = 0.0
-    #             else:
-    #                 if amount > 0:
-    #                     avg_price = cost / amount if amount != 0 else Decimal(0)
-    #                     new_record = TokenBuyData(
-    #                         wallet_address=wallet_address,
-    #                         token_address=token_address,
-    #                         total_amount=float(amount),
-    #                         total_cost=float(cost),
-    #                         avg_buy_price=float(avg_price),
-    #                         updated_at=datetime.now()
-    #                     )
-    #                     session.add(new_record)
-    #                 else:
-    #                     logger.warning(f"Attempted to create TokenBuyData for {wallet_address}/{token_address} with non-positive initial amount {amount}. Skipping.")
-
-    #             session.commit()
-    #             return True
-
-    #     except Exception as e:
-    #         logger.exception(f"更新 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
-    #         return False
-    
-    
-    # async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    #     """處理錢包活動記錄 - 优化版本，支持大批量处理"""
-    #     if not activities:
-    #         logger.info(f"錢包 {wallet_address} 沒有活動記錄")
-    #         return []
-
-    #     # 初始化数据库连接
-    #     db_ready = self._init_db_connection()
-    #     if not db_ready and self.db_enabled:
-    #         logger.error(f"數據庫未就緒，處理錢包 {wallet_address} 活動可能不完整")
-
-    #     # 获取钱包余额
-    #     try:
-    #         balance_data = await self.get_sol_balance(wallet_address)
-    #         wallet_balance = balance_data.get("balance", {}).get("float", 0)
-    #         logger.info(f"钱包 {wallet_address} 余额: {wallet_balance}")
-    #     except Exception as e:
-    #         logger.warning(f"获取钱包 {wallet_address} 余额失败: {e}，使用默认值")
-    #         wallet_balance = 0
-
-    #     processed_activities_results = []
-
-    #     # 按照block_time從舊到新排序
-    #     activities.sort(key=lambda x: x.get("block_time", 0))
-        
-    #     # 计算活动总数和预计处理时间
-    #     total_activities = len(activities)
-    #     logger.info(f"准备处理 {wallet_address} 的 {total_activities} 个活动")
-        
-    #     # 如果活动数量超过阈值，分批处理
-    #     MAX_BATCH_SIZE = 50  # 每批最大处理数量
-        
-    #     # 分批处理大量活动
-    #     for i in range(0, total_activities, MAX_BATCH_SIZE):
-    #         batch = activities[i:i+MAX_BATCH_SIZE]
-    #         batch_size = len(batch)
-    #         logger.info(f"处理 {wallet_address} 的第 {i//MAX_BATCH_SIZE + 1} 批活动 ({i+1}-{min(i+batch_size, total_activities)}/{total_activities})")
-            
-    #         # 处理当前批次活动
-    #         for activity in batch:
-    #             try:
-    #                 activity_type = activity.get("activity_type", "unknown")
-    #                 tx_hash = activity.get("tx_hash", "N/A")
-                    
-    #                 result = self.process_activity(activity, wallet_address, wallet_balance)
-                    
-    #                 if result and result.get("success", False):
-    #                     processed_activities_results.append(result)
-    #                 elif result:
-    #                     logger.warning(f"處理活動 {tx_hash} 失敗: {result.get('message', 'unknown error')}")
-    #                 else:
-    #                     logger.error(f"處理活動 {tx_hash} 返回 None")
-                    
-    #             except Exception as e:
-    #                 logger.exception(f"處理單個活動 (Tx: {activity.get('tx_hash', 'N/A')}) 時發生意外錯誤: {str(e)}")
-    #                 processed_activities_results.append({
-    #                     "success": False,
-    #                     "transaction_hash": activity.get('tx_hash', 'N/A'),
-    #                     "message": f"Unexpected processing error: {str(e)}"
-    #                 })
-            
-    #         # 批次处理完成后，让出CPU，避免长时间阻塞
-    #         if i + MAX_BATCH_SIZE < total_activities:
-    #             await asyncio.sleep(0.1)
-        
-    #     logger.info(f"完成处理 {wallet_address} 的所有活动，成功处理 {len(processed_activities_results)} 个")
-    #     return processed_activities_results
-
-    # async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    #     """處理錢包活動並保存交易信息"""
-    #     logger.info(f"處理錢包 {wallet_address} 的 {len(activities)} 筆活動")
-        
-    #     if not activities:
-    #         return []
-        
-    #     # 按時間戳排序活動（從舊到新）
-    #     sorted_activities = sorted(activities, key=lambda x: x.get("block_time", 0))
-        
-    #     # 獲取錢包餘額
-    #     wallet_balance = 0.0
-    #     try:
-    #         balance_info = await self.get_sol_balance(wallet_address)
-    #         wallet_balance = balance_info.get("lamports", 0) / 1e9  # 轉換為 SOL
-    #     except Exception as e:
-    #         logger.error(f"獲取錢包餘額失敗: {str(e)}")
-        
-    #     # 預先收集所有涉及的代幣地址並預載入代幣信息（只執行一次）
-    #     token_addresses = set()
-    #     for activity in sorted_activities:
-    #         if activity.get("activity_type") == "token_swap":
-    #             from_token = activity.get("from_token", {})
-    #             to_token = activity.get("to_token", {})
-    #             if from_token and "address" in from_token:
-    #                 token_addresses.add(from_token["address"])
-    #             if to_token and "address" in to_token:
-    #                 token_addresses.add(to_token["address"])
-    #         elif activity.get("activity_type") == "token_transfer":
-    #             token_address = activity.get("token_address", "")
-    #             if token_address:
-    #                 token_addresses.add(token_address)
-        
-    #     # 預先載入所有代幣信息
-    #     if token_addresses:
-    #         logger.info(f"預載入 {len(token_addresses)} 個代幣信息")
-    #         await token_repository.prefetch_token_info(list(token_addresses))
-        
-    #     # 初始化數據收集結構
-    #     processed_transactions = []
-    #     transaction_data_batch = []  # 收集要批量寫入的交易數據
-    #     token_updates = {}  # 用於收集代幣更新: {token_address: {'amount': 累計變化, 'cost': 累計成本, 'is_buy': 最後狀態}}
-        
-    #     # 單次遍歷處理每個活動
-    #     for activity in sorted_activities:
-    #         try:
-    #             activity_type = activity.get("activity_type", "").lower()
-    #             tx_hash = activity.get("tx_hash", "N/A")
-    #             start_time = time.time()
-                
-    #             # 處理各種活動類型
-    #             if activity_type == 'token_swap':
-    #                 # 處理代幣交換
-    #                 transaction_data = self._process_token_swap(wallet_address, activity, wallet_balance)
-                    
-    #                 # 更新代幣數據收集
-    #                 if transaction_data and transaction_data.get("success"):
-    #                     token_address = transaction_data.get("token_address")
-    #                     is_buy = transaction_data.get("transaction_type") == "buy"
-    #                     amount = Decimal(str(transaction_data.get("amount", 0)))
-    #                     cost = Decimal(str(transaction_data.get("value", 0)))
-                        
-    #                     # 正確計算更新值（買入為正，賣出為負）
-    #                     update_amount = amount if is_buy else -amount
-                        
-    #                     # 收集代幣更新
-    #                     if token_address not in token_updates:
-    #                         token_updates[token_address] = {'amount': 0, 'cost': 0, 'is_buy': is_buy}
-                        
-    #                     token_updates[token_address]['amount'] += update_amount
-    #                     if is_buy:
-    #                         token_updates[token_address]['cost'] += cost
-    #                     token_updates[token_address]['is_buy'] = is_buy
-                    
-    #             elif activity_type == 'token_transfer':
-    #                 # 處理代幣轉帳
-    #                 transaction_data = self._process_token_transfer(wallet_address, activity)
-                    
-    #                 # 更新代幣數據收集
-    #                 if transaction_data and transaction_data.get("success"):
-    #                     token_address = transaction_data.get("token_address")
-    #                     is_incoming = transaction_data.get("type") == "receive"
-    #                     amount = Decimal(str(transaction_data.get("amount", 0)))
-                        
-    #                     # 轉帳進出計算（進為正，出為負）
-    #                     update_amount = amount if is_incoming else -amount
-                        
-    #                     # 收集代幣更新
-    #                     if token_address not in token_updates:
-    #                         token_updates[token_address] = {'amount': 0, 'cost': 0, 'is_buy': False}
-                        
-    #                     token_updates[token_address]['amount'] += update_amount
-    #                     # 轉帳不影響成本
-                
-    #             elif activity_type == 'token_activities':
-    #                 # 處理批量代幣活動
-    #                 transaction_data = self._process_bulk_token_activities(wallet_address, activity)
-                    
-    #                 # 批量活動有特殊處理邏輯，在函數內部處理token_updates
-                
-    #             else:
-    #                 logger.warning(f"未知的活動類型: {activity_type} (Tx: {tx_hash})")
-    #                 transaction_data = {
-    #                     "success": False,
-    #                     "transaction_hash": tx_hash,
-    #                     "message": f"未知的活動類型: {activity_type}"
-    #                 }
-                
-    #             # 記錄處理時間
-    #             if transaction_data:
-    #                 elapsed = time.time() - start_time
-    #                 logger.debug(f"處理活動 {activity_type} (Tx: {tx_hash}) 完成, 耗時: {elapsed:.2f}秒")
-                    
-    #                 # 只有成功的交易才加入批次
-    #                 if transaction_data.get("success", False):
-    #                     processed_transactions.append(transaction_data)
-                        
-    #                     # 如果有transaction_data數據，加入批次
-    #                     if "transaction_data" in transaction_data:
-    #                         transaction_data_batch.append(transaction_data["transaction_data"])
-                        
-    #                     # 每50筆交易批量寫入一次
-    #                     if len(transaction_data_batch) >= 50:
-    #                         await self.save_transactions_batch(transaction_data_batch)
-    #                         transaction_data_batch = []
-                
-    #         except Exception as e:
-    #             logger.exception(f"處理活動時出錯: {str(e)}")
-        
-    #     # 處理剩餘的交易
-    #     if transaction_data_batch:
-    #         await self.save_transactions_batch(transaction_data_batch)
-        
-    #     # 批量更新TokenBuyData表（只執行一次）
-    #     if token_updates:
-    #         logger.info(f"批量更新錢包 {wallet_address} 的 {len(token_updates)} 個代幣購買數據")
-    #         await self.update_token_buy_data_batch(wallet_address, token_updates)
-        
-    #     logger.info(f"完成處理 {wallet_address} 錢包的 {len(processed_transactions)} 筆交易")
-    #     return processed_transactions
 
     async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """處理錢包活動 - 使用本地緩存計算利潤"""
@@ -1157,57 +953,6 @@ class TransactionProcessor:
             logger.exception(f"批量保存交易失敗: {str(e)}")
             return False
 
-    # def process_activity(self, activity: dict, wallet_address: str, wallet_balance: float, token_updates: Dict[str, Dict]) -> Optional[Dict[str, Any]]:
-    #     """根據活動類型處理活動並創建交易記錄"""
-    #     if not activity or not wallet_address:
-    #         logger.error("處理活動失敗: 缺少活動數據或錢包地址")
-    #         return {"success": False, "message": "Missing activity data or wallet address"}
-
-    #     tx_hash = activity.get("tx_hash", "N/A")
-
-    #     try:
-    #         start_time = time.time()
-    #         activity_type = activity.get("activity_type", "").lower()
-    #         # logger.info(f"處理活動: {activity_type} 來自錢包 {wallet_address} (Tx: {tx_hash})")
-
-    #         result = None
-    #         if activity_type == 'token_swap':
-    #             if token_address not in token_updates:
-    #                 token_updates[token_address] = {'amount': 0, 'cost': 0, 'is_buy': is_buy}
-                
-    #             token_updates[token_address]['amount'] += update_amount
-    #             if is_buy:
-    #                 token_updates[token_address]['cost'] += cost
-    #             token_updates[token_address]['is_buy'] = is_buy  # 記錄最後一次操作狀態
-    #             result = self._process_token_swap(wallet_address, activity, wallet_balance)
-
-    #         elif activity_type == 'token_transfer':
-    #             result = self._process_token_transfer(wallet_address, activity)
-
-    #         elif activity_type == 'token_activities':
-    #             result = self._process_bulk_token_activities(wallet_address, activity)
-
-    #         else:
-    #             logger.warning(f"未知的活動類型: {activity_type} (Tx: {tx_hash})")
-    #             result = {
-    #                 "success": False,
-    #                 "transaction_hash": tx_hash,
-    #                 "message": f"未知的活動類型: {activity_type}"
-    #             }
-
-    #         if result:
-    #             elapsed = time.time() - start_time
-    #             logger.info(f"處理活動 {activity_type} (Tx: {tx_hash}) 完成, 耗時: {elapsed:.2f}秒, Success: {result.get('success', 'N/A')}")
-    #         return result
-
-    #     except Exception as e:
-    #         logger.exception(f"處理活動 (Tx: {tx_hash}) 時發生不可預期的錯誤: {e}")
-    #         return {
-    #             "success": False,
-    #             "transaction_hash": tx_hash,
-    #             "message": f"處理活動時發生不可預期的錯誤: {str(e)}"
-    #         }
-    
     def _process_token_swap_with_cache(self, wallet_address, activity_data, wallet_balance, token_cache, token_buy_cache):
         """處理代幣交換活動 - 使用本地緩存計算利潤"""
         tx_hash = activity_data.get('tx_hash', 'N/A')
@@ -1876,196 +1621,18 @@ class TransactionProcessor:
             logger.exception(f"更新交易利潤數據時出錯: {e}")
             return False
     
-    # async def save_transaction(self, transaction: Dict[str, Any]) -> bool:
-    #     try:
-    #         signature = transaction.get("signature")
-    #         transaction_time = transaction.get("transaction_time")
-    #         if not signature:
-    #             logger.error("保存交易失敗: 缺少簽名")
-    #             return False
-        
-    #         with self.session_factory() as session:
-    #             try:
-    #                 # 查詢是否存在相同signature的交易
-    #                 query = select(Transaction).where(
-    #                     and_(
-    #                         Transaction.signature == signature,
-    #                         Transaction.transaction_time == transaction.get("transaction_time")
-    #                     )
-    #                 )
-    #                 existing_transaction = session.execute(query).scalars().first()
-                    
-    #                 # 獲取所有需要的代幣信息
-    #                 token_address = transaction.get("token_address")
-    #                 from_token_address = transaction.get("from_token_address")
-    #                 dest_token_address = transaction.get("dest_token_address")
-                    
-    #                 # 獲取代幣信息
-    #                 token_info = self.get_token_info_safely(token_address)
-    #                 from_token_info = self.get_token_info_safely(from_token_address)
-    #                 dest_token_info = self.get_token_info_safely(dest_token_address)
-                    
-    #                 # 更新交易數據
-    #                 if token_info:
-    #                     if "token_name" not in transaction or not transaction["token_name"]:
-    #                         transaction["token_name"] = token_info.get("symbol") or token_info.get("name")
-                        
-    #                     if "token_icon" not in transaction or not transaction["token_icon"]:
-    #                         transaction["token_icon"] = token_info.get("icon") or token_info.get("url")
-                        
-    #                     # 計算marketcap (如果有supply_float)
-    #                     if "marketcap" not in transaction or not transaction["marketcap"]:
-    #                         price = self._convert_to_float(transaction.get("price", 0))
-    #                         # 從token_info獲取supply_float，如果沒有則使用預設值
-    #                         supply_float = token_info.get("supply_float", 1000000000)  # 預設供應量為10億
-    #                         if price:  # 只要有價格就計算marketcap
-    #                             transaction["marketcap"] = price * supply_float
-    #                         else:
-    #                             transaction["marketcap"] = 0  # 如果沒有價格，marketcap設為0而不是null
-                    
-    #                 # 更新代幣符號
-    #                 if from_token_info and "from_token_symbol" not in transaction:
-    #                     transaction["from_token_symbol"] = from_token_info.get("symbol")
-                    
-    #                 if dest_token_info and "dest_token_symbol" not in transaction:
-    #                     transaction["dest_token_symbol"] = dest_token_info.get("symbol")
-
-    #                 # 計算holding_percentage
-    #                 transaction_type = transaction.get("transaction_type")
-    #                 amount = self._convert_to_float(transaction.get("amount", 0))
-    #                 value = self._convert_to_float(transaction.get("value", 0))
-    #                 wallet_address = transaction.get("wallet_address")
-                    
-    #                 if transaction_type == "buy" and value > 0:
-    #                     wallet_balance = self._convert_to_float(transaction.get("wallet_balance", 0))
-    #                     holding_pct = value / (wallet_balance + value) * 100
-    #                     transaction["holding_percentage"] = min(100, max(-100, holding_pct))
-    #                 elif transaction_type == "sell" and amount > 0:
-    #                     token_buy_data = self.get_token_buy_data(wallet_address, token_address)
-    #                     current_amount = self._convert_to_float(token_buy_data.get("total_amount", 0))
-    #                     if current_amount > 0:
-    #                         holding_pct = (amount / current_amount) * 100
-    #                         transaction["holding_percentage"] = min(100, max(-100, holding_pct))
-    #                     else:
-    #                         transaction["holding_percentage"] = 100
-                    
-    #                 # 計算realized_profit和realized_profit_percentage (只有賣出才有)
-    #                 if transaction_type == "sell":
-    #                     token_buy_data = self.get_token_buy_data(wallet_address, token_address)
-    #                     avg_buy_price = self._convert_to_float(token_buy_data.get("avg_buy_price", 0))
-    #                     sell_price = self._convert_to_float(transaction.get("price", 0))
-                        
-    #                     # logger.info(f"賣出交易計算利潤: 地址={wallet_address}, 代幣={token_address}")
-    #                     # logger.info(f"獲取到的avg_buy_price={avg_buy_price}, sell_price={sell_price}, amount={amount}")
-    #                     # logger.info(f"token_buy_data={token_buy_data}")
-                        
-    #                     if avg_buy_price > 0 and amount > 0:
-    #                         realized_profit, realized_profit_percentage = self.calculate_realized_profit(token_address, amount, sell_price, avg_buy_price)
-    #                         realized_profit_percentage = min(1000, max(-100, realized_profit_percentage))
-    #                         transaction["realized_profit"] = realized_profit
-    #                         transaction["realized_profit_percentage"] = realized_profit_percentage
-    #                         # logger.info(f"計算結果: realized_profit={realized_profit}, realized_profit_percentage={realized_profit_percentage}")
-    #                     else:
-    #                         logger.warning(f"無法計算利潤: avg_buy_price={avg_buy_price}, amount={amount}")
-    #                         transaction["realized_profit"] = 0
-    #                         transaction["realized_profit_percentage"] = 0
-    #                 else:
-    #                     # 買入時這些值為0
-    #                     transaction["realized_profit"] = 0
-    #                     transaction["realized_profit_percentage"] = 0
-
-    #                 time = datetime.now(tz_utc8)
-    #                 formatted_time = time.strftime('%Y-%m-%d %H:%M:%S.%f')
-
-    #                 if not transaction.get("wallet_balance"):
-    #                     try:
-    #                         sol_balance = await self.get_sol_balance(wallet_address)
-    #                         if sol_balance and sol_balance.get("balance"):
-    #                             transaction["wallet_balance"] = sol_balance.get("balance", {}).get("float", 0)
-    #                         else:
-    #                             logger.warning(f"無法獲取 {wallet_address} 的餘額，使用預設值 0")
-    #                             transaction["wallet_balance"] = 0
-    #                     except Exception as e:
-    #                         logger.error(f"獲取餘額時出錯: {e}")
-    #                         transaction["wallet_balance"] = 0  # 使用預設值
-
-    #                 # 如果交易已存在，則更新它
-    #                 if existing_transaction:
-    #                     # logger.info(f"交易 {signature} 已存在，正在更新...")
-                        
-    #                     # 更新現有記錄的各個欄位
-    #                     existing_transaction.wallet_balance = transaction.get("wallet_balance")
-    #                     existing_transaction.token_name = transaction.get("token_name")
-    #                     existing_transaction.token_icon = transaction.get("token_icon")
-    #                     existing_transaction.value = self._convert_to_float(transaction.get("value"))
-    #                     existing_transaction.price = self._convert_to_float(transaction.get("price"))
-    #                     existing_transaction.marketcap = transaction.get("marketcap")
-    #                     existing_transaction.from_token_symbol = transaction.get("from_token_symbol")
-    #                     existing_transaction.dest_token_symbol = transaction.get("dest_token_symbol")
-    #                     existing_transaction.holding_percentage = self._convert_to_float(transaction.get("holding_percentage", 0))
-    #                     existing_transaction.realized_profit = self._convert_to_float(transaction.get("realized_profit", 0))
-    #                     existing_transaction.realized_profit_percentage = self._convert_to_float(transaction.get("realized_profit_percentage", 0))
-    #                     existing_transaction.time = formatted_time  # 更新時間戳
-                        
-    #                     session.commit()
-    #                     # logger.info(f"成功更新交易 {signature}")
-    #                     return True
-    #                 else:
-    #                     # 如果交易不存在，創建新記錄
-    #                     new_transaction = Transaction(
-    #                         wallet_address=wallet_address,
-    #                         wallet_balance=transaction.get("wallet_balance"),
-    #                         signature=signature,
-    #                         transaction_time=transaction.get("transaction_time"),
-    #                         transaction_type=transaction_type,
-    #                         token_address=token_address,
-    #                         token_name=transaction.get("token_name"),
-    #                         token_icon=transaction.get("token_icon"),
-    #                         marketcap=transaction.get("marketcap"),
-    #                         amount=self._convert_to_float(transaction.get("amount")),
-    #                         value=self._convert_to_float(transaction.get("value")),
-    #                         price=self._convert_to_float(transaction.get("price")),
-    #                         holding_percentage=self._convert_to_float(transaction.get("holding_percentage", 0)),
-    #                         realized_profit=self._convert_to_float(transaction.get("realized_profit", 0)),
-    #                         realized_profit_percentage=self._convert_to_float(transaction.get("realized_profit_percentage", 0)),
-    #                         chain=transaction.get("chain", "SOLANA"),
-    #                         from_token_address=from_token_address,
-    #                         from_token_symbol=transaction.get("from_token_symbol"),
-    #                         from_token_amount=self._convert_to_float(transaction.get("from_token_amount")),
-    #                         dest_token_address=dest_token_address,
-    #                         dest_token_symbol=transaction.get("dest_token_symbol"),
-    #                         dest_token_amount=self._convert_to_float(transaction.get("dest_token_amount")),
-    #                         time=formatted_time
-    #                     )
-    #                     session.add(new_transaction)
-    #                     session.commit()
-    #                     return True
-                    
-    #             except sqlalchemy.exc.IntegrityError as e:
-    #                 # 在內部捕獲並處理完整性錯誤
-    #                 session.rollback()
-    #                 if "duplicate key value violates unique constraint" in str(e):
-    #                     logger.info(f"交易已存在，無需重複插入: {signature}")
-    #                     return True  # 視為成功
-    #                 else:
-    #                     logger.error(f"保存交易時出現完整性錯誤: {e}")
-    #                     return False
-                
-    #     except Exception as e:
-    #         logger.exception(f"保存/更新交易 {signature} 時發生錯誤: {e}")
-    #         return False
-
     async def save_transaction(self, transaction: Dict[str, Any]) -> bool:
         try:
             signature = transaction.get("signature")
             transaction_time = transaction.get("transaction_time")
+            pool_address = transaction.get("pool_address")
             if not signature:
                 logger.error("保存交易失敗: 缺少簽名")
                 return False
         
             with self.session_factory() as session:
                 try:
-                    # 查詢是否存在相同signature和transaction_time的交易
+                    # 查詢是否存在相同signature的交易
                     query = select(Transaction).where(
                         and_(
                             Transaction.signature == signature,
@@ -2236,6 +1803,77 @@ class TransactionProcessor:
                                 "last_price": price
                             }
                             self.update_token_buy_data(wallet_address, token_address, buy_data)
+
+                    # 初始化 realized_profit 為 0
+                    realized_profit = 0
+                    realized_profit_percentage = 0
+
+                    # 如果是賣出交易，計算已實現收益
+                    if transaction_type == "sell":
+                        token_buy_data = self.get_token_buy_data(wallet_address, token_address)
+                        avg_buy_price = token_buy_data.get("avg_buy_price", 0)
+                        
+                        if avg_buy_price > 0:
+                            # 檢查 calculate_realized_profit 返回的類型
+                            profit_result = self.calculate_realized_profit(
+                                token_address, 
+                                amount, 
+                                price, 
+                                avg_buy_price
+                            )
+                            
+                            # 如果返回的是元組，取第一個元素
+                            if isinstance(profit_result, tuple):
+                                realized_profit = profit_result[0]
+                            else:
+                                realized_profit = profit_result
+                                
+                            # 計算收益率
+                            if avg_buy_price * amount > 0:
+                                realized_profit_percentage = (realized_profit / (avg_buy_price * amount)) * 100
+                        else:
+                            logger.warning(f"無法計算利潤: avg_buy_price={avg_buy_price}, amount={amount}")
+
+                    # 構建 API 發送數據
+                    smart_token_event_data = {
+                        "network": "SOLANA",
+                        "tokenAddress": token_address,
+                        "poolAddress": pool_address,
+                        "smartAddress": wallet_address,
+                        "transactionType": transaction_type,
+                        "transactionFromAmount": str(transaction.get("from_token_amount", "0")),
+                        "transactionFromToken": transaction.get("from_token_address", ""),
+                        "transactionToAmount": str(transaction.get("dest_token_amount", "0")),
+                        "transactionToToken": transaction.get("dest_token_address", ""),
+                        "transactionPrice": str(price),
+                        "totalPnl": str(realized_profit),
+                        "transactionTime": str(transaction_time),
+                        "brand": "BYD"
+                    }
+
+                    # 將事件添加到待發送隊列
+                    if not hasattr(self, 'pending_events'):
+                        self.pending_events = []
+                    self.pending_events.append(smart_token_event_data)
+
+                    # 檢查是否需要發送批量事件
+                    if len(self.pending_events) >= self.event_batch_size:
+                        try:
+                            async with aiohttp.ClientSession() as session:
+                                async with session.post(
+                                    self.api_endpoint,
+                                    json=self.pending_events,
+                                    headers={"Content-Type": "application/json"},
+                                    timeout=aiohttp.ClientTimeout(total=30)
+                                ) as response:
+                                    if response.status == 200:
+                                        logger.info(f"成功批量發送 {len(self.pending_events)} 個事件")
+                                        self.pending_events = []
+                                    else:
+                                        response_text = await response.text()
+                                        logger.error(f"批量發送事件失敗: {response.status}, {response_text}")
+                        except Exception as e:
+                            logger.error(f"批量發送事件時發生錯誤: {str(e)}")
 
                     # 如果交易已存在，則更新它
                     if existing_transaction:

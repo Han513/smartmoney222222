@@ -144,14 +144,6 @@ class WalletSummaryService:
                     session.commit()
                     logger.info(f"已為無交易記錄的錢包 {wallet_address} 創建基本摘要記錄")
                     
-                    # 將錢包添加到同步隊列
-                    try:
-                        logger.info(f"正在將錢包 {wallet_address} 添加到同步隊列...")
-                        await wallet_sync_service.add_wallet(wallet_address)
-                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
-                    except Exception as e:
-                        logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
-                    
                     return True
                 else:
                     # 記錄已存在，更新餘額和時間
@@ -160,6 +152,13 @@ class WalletSummaryService:
                     wallet_summary.update_time = datetime.now()
                     session.commit()
                     logger.info(f"錢包 {wallet_address} 的記錄已存在，已更新餘額和時間")
+                    try:
+                        logger.info(f"正在將錢包 {wallet_address} 添加到同步隊列...")
+                        await wallet_sync_service.add_wallet(wallet_address)
+                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                    except Exception as e:
+                        logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
+                        
                     return True
                     
         except Exception as e:
