@@ -218,7 +218,7 @@ class SolscanClient:
                 # 組合完整 URL
                 base_url = f"{self.api_url}/account/defi/activities"
                 full_url = f"{base_url}?{'&'.join(query_params)}"
-                logger.info(f"請求 Solscan API: {full_url}")
+                # logger.info(f"請求 Solscan API: {full_url}")
                 
                 # 添加重試邏輯
                 retry_count = 0
@@ -367,6 +367,88 @@ class SolscanClient:
         except Exception as e:
             logger.exception(f"直接測試 API 時發生錯誤: {e}")
             return {"error": str(e), "status": "exception"}
+
+    async def get_wallet_token_transactions(
+        self,
+        wallet_address: str,
+        token_address: str,
+        page: int = 1,
+        page_size: int = 100,
+        from_time: int = None,
+        to_time: int = None,
+        max_retries: int = 3,
+        retry_delay: int = 2
+    ) -> List[Dict[str, Any]]:
+        """
+        獲取錢包在特定代幣上的所有交易記錄
+        支援 from_time/to_time 參數
+        """
+        logger.info(f"獲取錢包 {wallet_address} 關於代幣 {token_address} 的交易記錄")
+        try:
+            session = await self.get_session()
+            base_url = f"{self.api_url}/account/defi/activities"
+            # 構建查詢參數
+            query_params = [
+                f"address={wallet_address}",
+                "activity_type[]=ACTIVITY_TOKEN_SWAP",
+                "activity_type[]=ACTIVITY_AGG_TOKEN_SWAP",
+                f"token={token_address}",
+                f"page={page}",
+                f"page_size={page_size}",
+                "sort_by=block_time",
+                "sort_order=asc"
+            ]
+            if from_time is not None:
+                query_params.append(f"from_time={from_time}")
+            if to_time is not None:
+                query_params.append(f"to_time={to_time}")
+            # 組合完整 URL
+            full_url = f"{base_url}?{'&'.join(query_params)}"
+            # logger.info(f"請求 Solscan API: {full_url}")
+            # 添加重試邏輯
+            retry_count = 0
+            while retry_count < max_retries:
+                try:
+                    async with session.get(full_url, timeout=30) as response:
+                        if response.status == 200:
+                            data = await response.json()
+                            if data.get("success") and "data" in data:
+                                logger.info(f"成功獲取 {len(data['data'])} 筆交易記錄")
+                                return data["data"]
+                            else:
+                                logger.error(f"API 請求失敗: {data.get('message', '未知錯誤')}")
+                                return []
+                        else:
+                            error_text = await response.text()
+                            logger.warning(f"Solscan API 請求失敗 (嘗試 {retry_count+1}/{max_retries}): {response.status} - {error_text}")
+                            retry_count += 1
+                            if retry_count < max_retries:
+                                logger.info(f"等待 {retry_delay} 秒後重試...")
+                                await asyncio.sleep(retry_delay)
+                            else:
+                                logger.error(f"達到最大重試次數 ({max_retries})，放棄請求")
+                                return []
+                except asyncio.TimeoutError:
+                    logger.warning(f"請求超時 (嘗試 {retry_count+1}/{max_retries})")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        logger.info(f"等待 {retry_delay} 秒後重試...")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"達到最大重試次數 ({max_retries})，放棄請求")
+                        return []
+                except Exception as e:
+                    logger.warning(f"請求過程中發生錯誤 (嘗試 {retry_count+1}/{max_retries}): {e}")
+                    retry_count += 1
+                    if retry_count < max_retries:
+                        logger.info(f"等待 {retry_delay} 秒後重試...")
+                        await asyncio.sleep(retry_delay)
+                    else:
+                        logger.error(f"達到最大重試次數 ({max_retries})，放棄請求")
+                        return []
+        except Exception as e:
+            logger.exception(f"獲取錢包代幣交易記錄時發生錯誤: {e}")
+            return []
 
 # 創建單例實例
 solscan_client = SolscanClient()

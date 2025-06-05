@@ -1,7 +1,7 @@
 # app/services/wallet_summary_service.py
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Any, Optional, List
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -13,6 +13,9 @@ from app.services.wallet_sync_service import wallet_sync_service
 
 logger = logging.getLogger(__name__)
 
+# 定義 UTC+8 時區
+UTC_PLUS_8 = timezone(timedelta(hours=8))
+
 class WalletSummaryService:
     """
     錢包摘要服務 - 負責管理錢包摘要數據的更新
@@ -20,73 +23,6 @@ class WalletSummaryService:
     
     def __init__(self):
         self.session_factory = get_session_factory()
-
-    # async def ensure_wallet_exists(self, wallet_address: str) -> bool:
-    #     """
-    #     確保錢包在 WalletSummary 表中存在，如果不存在則創建基本記錄
-        
-    #     Args:
-    #         wallet_address: 錢包地址
-            
-    #     Returns:
-    #         bool: 操作是否成功
-    #     """
-    #     try:
-    #         with self.session_factory() as session:
-    #             # 查詢現有記錄
-    #             wallet_summary = self._get_wallet_summary(session, wallet_address)
-                
-    #             if not wallet_summary:
-    #                 # 如果記錄不存在，則創建基本記錄
-    #                 wallet_summary = WalletSummary(
-    #                     address=wallet_address,
-    #                     chain="SOLANA",
-    #                     is_active=True,
-    #                     update_time=datetime.now(),
-    #                     # 設置數值欄位為 0
-    #                     balance=0,
-    #                     balance_USD=0,
-    #                     total_transaction_num_30d=0,
-    #                     total_transaction_num_7d=0,
-    #                     total_transaction_num_1d=0,
-    #                     buy_num_30d=0,
-    #                     buy_num_7d=0,
-    #                     buy_num_1d=0,
-    #                     sell_num_30d=0,
-    #                     sell_num_7d=0,
-    #                     sell_num_1d=0,
-    #                     win_rate_30d=0,
-    #                     win_rate_7d=0,
-    #                     win_rate_1d=0,
-    #                     pnl_30d=0,
-    #                     pnl_7d=0,
-    #                     pnl_1d=0,
-    #                     pnl_percentage_30d=0,
-    #                     pnl_percentage_7d=0,
-    #                     pnl_percentage_1d=0,
-    #                     wallet_type=0
-    #                 )
-    #                 session.add(wallet_summary)
-    #                 session.commit()
-    #                 logger.info(f"已創建錢包 {wallet_address} 的基本記錄")
-                    
-    #                 # 將錢包添加到同步隊列
-    #                 try:
-    #                     logger.info(f"正在將錢包 {wallet_address} 添加到同步隊列...")
-    #                     await wallet_sync_service.add_wallet(wallet_address)
-    #                     logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
-    #                 except Exception as e:
-    #                     logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
-                    
-    #                 return True
-    #             else:
-    #                 # 記錄已存在，不需要操作
-    #                 logger.info(f"錢包 {wallet_address} 的記錄已存在，無需創建")
-    #                 return True
-                    
-    #     except Exception as e:
-    #         logger.exception(f"確保錢包存在時發生錯誤: {e}")
-    #         return False
         
     async def create_empty_wallet_summary(self, wallet_address: str) -> bool:
         """
@@ -112,13 +48,14 @@ class WalletSummaryService:
                 if not wallet_summary:
                     # 如果記錄不存在，則創建基本記錄
                     wallet_summary = WalletSummary(
-                        address=wallet_address,
+                        wallet_address=wallet_address,
                         chain="SOLANA",
+                        chain_id=501,
                         is_active=True,
-                        update_time=datetime.now(),
+                        update_time=datetime.now(UTC_PLUS_8),
                         # 設置餘額
                         balance=balance,
-                        balance_USD=balance_usd,
+                        balance_usd=balance_usd,
                         # 設置交易相關欄位為 0
                         total_transaction_num_30d=0,
                         total_transaction_num_7d=0,
@@ -148,8 +85,8 @@ class WalletSummaryService:
                 else:
                     # 記錄已存在，更新餘額和時間
                     wallet_summary.balance = balance
-                    wallet_summary.balance_USD = balance_usd
-                    wallet_summary.update_time = datetime.now()
+                    wallet_summary.balance_usd = balance_usd
+                    wallet_summary.update_time = datetime.now(UTC_PLUS_8)
                     session.commit()
                     logger.info(f"錢包 {wallet_address} 的記錄已存在，已更新餘額和時間")
                     try:
@@ -165,13 +102,21 @@ class WalletSummaryService:
             logger.exception(f"為無交易記錄的錢包創建摘要記錄時發生錯誤: {e}")
             return False
     
-    async def update_full_summary(self, wallet_address: str, tx_stats: Dict[str, Any] = None) -> bool:
+    async def update_full_summary(
+        self, 
+        wallet_address: str, 
+        tx_stats: Dict[str, Any] = None,
+        twitter_name: Optional[str] = None,
+        twitter_username: Optional[str] = None
+    ) -> bool:
         """
         完整更新錢包摘要（用於歷史數據分析）
         
         Args:
             wallet_address: 錢包地址
             tx_stats: 預先計算的交易統計數據（可選）
+            twitter_name: Twitter 名稱（可選）
+            twitter_username: Twitter 用戶名（可選）
             
         Returns:
             bool: 更新是否成功
@@ -181,33 +126,38 @@ class WalletSummaryService:
             with self.session_factory() as session:
                 # 查詢現有記錄
                 wallet_summary = self._get_wallet_summary(session, wallet_address)
-                
+
                 # 獲取錢包餘額
                 balance_data = await transaction_processor.get_sol_balance(wallet_address)
                 balance = balance_data.get("balance", {}).get("int", 0)
                 balance_usd = balance_data.get("balance", {}).get("float", 0)
-                
                 # 預設值設定
                 summary_data = {
-                    "address": wallet_address,
+                    "wallet_address": wallet_address,
                     "balance": balance,
-                    "balance_USD": balance_usd,
+                    "balance_usd": balance_usd,
                     "chain": "SOLANA",
+                    "tag": "kol" if twitter_name and twitter_username else None,
+                    "is_smart_wallet": True if twitter_name and twitter_username else False,
+                    "chain_id": 501,
+                    "wallet_type": 0,
                     "is_active": True,
-                    "update_time": datetime.now()
+                    "twitter_name": twitter_name,
+                    "twitter_username": twitter_username,
+                    "update_time": datetime.now(UTC_PLUS_8)
                 }
-                
+
                 # 如果提供了交易統計數據，則合併
                 if tx_stats:
                     summary_data.update(tx_stats)
-                
+
                 # 更新或創建記錄
                 if wallet_summary:
                     self._update_wallet_summary(wallet_summary, summary_data)
                 else:
                     wallet_summary = WalletSummary(**summary_data)
                     session.add(wallet_summary)
-                
+
                 session.commit()
                 logger.info(f"成功完整更新錢包 {wallet_address} 的摘要記錄")
                 try:
@@ -216,9 +166,9 @@ class WalletSummaryService:
                     logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
                 except Exception as e:
                     logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
-                
+
                 return True
-                
+
         except Exception as e:
             logger.exception(f"完整更新錢包摘要時發生錯誤: {e}")
             return False
@@ -242,15 +192,16 @@ class WalletSummaryService:
                 if not wallet_summary:
                     # 如果記錄不存在，則創建基本記錄
                     wallet_summary = WalletSummary(
-                        address=wallet_address,
+                        wallet_address=wallet_address,
                         chain="SOLANA",
+                        chain_id=501,
                         is_active=True,
-                        update_time=datetime.now()
+                        update_time=datetime.now(UTC_PLUS_8)
                     )
                     session.add(wallet_summary)
                 
                 # 更新指定字段
-                update_data["update_time"] = datetime.now()
+                update_data["update_time"] = datetime.now(UTC_PLUS_8)
                 self._update_wallet_summary(wallet_summary, update_data)
                 
                 session.commit()
@@ -283,10 +234,11 @@ class WalletSummaryService:
                 if not wallet_summary:
                     # 如果記錄不存在，則創建基本記錄
                     wallet_summary = WalletSummary(
-                        address=wallet_address,
+                        wallet_address=wallet_address,
                         chain="SOLANA",
+                        chain_id=501,
                         is_active=True,
-                        update_time=datetime.now()
+                        update_time=datetime.now(UTC_PLUS_8)
                     )
                     session.add(wallet_summary)
                 
@@ -313,7 +265,7 @@ class WalletSummaryService:
     def _get_wallet_summary(self, session: Session, wallet_address: str) -> Optional[WalletSummary]:
         """獲取錢包摘要記錄"""
         return session.execute(
-            select(WalletSummary).where(WalletSummary.address == wallet_address)
+            select(WalletSummary).where(WalletSummary.wallet_address == wallet_address)
         ).scalar_one_or_none()
     
     def _update_wallet_summary(self, wallet_summary: WalletSummary, update_data: Dict[str, Any]) -> None:

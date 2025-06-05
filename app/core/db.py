@@ -52,7 +52,8 @@ def get_session_factory():
         max_overflow=20,        # 增加最大溢出连接数
         pool_timeout=60,        # 增加获取连接超时时间
         pool_recycle=1800,      # 每30分钟回收连接
-        pool_pre_ping=True      # 使用前测试连接活跃性
+        pool_pre_ping=True,     # 使用前测试连接活跃性
+        connect_args={'options': '-csearch_path=dex_query_v1,public'}
     )
     
     session_factory = sessionmaker(

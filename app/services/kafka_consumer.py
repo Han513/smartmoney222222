@@ -101,7 +101,7 @@ class KafkaConsumerService:
                             
                             # 檢查是否是我們期望的格式
                             if not self._validate_event(event_data):
-                                logger.warning(f"收到無效的事件格式: {event_data}")
+                                # logger.warning(f"收到無效的事件格式: {event_data}")
                                 await self.consumer.commit()
                                 continue
                             

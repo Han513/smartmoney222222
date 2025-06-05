@@ -8,6 +8,7 @@ from app.core.config import settings
 from app.services.wallet_analyzer import wallet_analyzer
 from app.services.cache_service import cache_service
 from celery.signals import worker_process_init, worker_process_shutdown
+from sqlalchemy import update, func
 
 logger = logging.getLogger(__name__)
 
@@ -59,50 +60,69 @@ def run_async_task(coro):
 
 # 处理单个钱包的任务
 @celery_app.task(name="process_single_wallet")
-def process_single_wallet(address, time_range=7, include_metrics=None, request_id=None, chain="SOLANA"):
+def process_single_wallet(
+    address, 
+    time_range=7, 
+    include_metrics=None, 
+    request_id=None, 
+    chain="SOLANA",
+    twitter_name=None,  # 新增 Twitter 名稱參數
+    twitter_username=None  # 新增 Twitter 用戶名參數
+):
     """处理单个钱包分析的Celery任务"""
     from app.services.wallet_analyzer import wallet_analyzer
     from app.services.cache_service import cache_service
+    from app.models.models import WalletSummary
+    from app.core.db import get_session_factory
     
     try:
         logger.info(f"开始处理钱包任务: {address}, 链: {chain}, 请求ID: {request_id}")
         start_time = time.time()
         
-        # 运行异步分析函数，传入 chain 参数
+        # 運行異步分析函數
         result = run_async_task(wallet_analyzer.analyze_wallet(
             address, 
             time_range=time_range,
             include_metrics=include_metrics,
-            chain=chain  # 添加 chain 參數
+            chain=chain,
+            twitter_name=twitter_name,
+            twitter_username=twitter_username
         ))
         
-        # 更新缓存，使用包含 chain 的键
+        # 如果提供了 Twitter 資訊，更新錢包摘要表
+        if twitter_name or twitter_username:
+            session_factory = get_session_factory()
+            with session_factory() as session:
+                # 檢查是否已存在記錄
+                stmt = update(WalletSummary).where(
+                    WalletSummary.wallet_address == address,
+                    WalletSummary.chain == chain
+                ).values(
+                    twitter_name=twitter_name,
+                    twitter_username=twitter_username
+                )
+                session.execute(stmt)
+                session.commit()
+                logger.info(f"已更新錢包 {address} 的 Twitter 資訊")
+        
+        # 更新缓存
         run_async_task(cache_service.set(f"wallet:{chain}:{address}", result, expiry=3600))
         
         # 如果有请求ID，更新请求状态
         if request_id:
             async def update_req_status():
-                # 获取当前请求状态
                 req_status = await cache_service.get(f"req:{request_id}")
                 if req_status:
-                    # 更新状态
                     if address in req_status.get("pending_addresses", []):
                         req_status["pending_addresses"].remove(address)
-                    
-                    # 确保ready_results存在
                     if "ready_results" not in req_status:
                         req_status["ready_results"] = {}
-                    
-                    # 添加结果
                     req_status["ready_results"][address] = {
                         "address": address,
                         "metrics": result,
                         "last_updated": int(time.time())
                     }
-                    
-                    # 保存更新后的状态
                     await cache_service.set(f"req:{request_id}", req_status, expiry=3600)
-            
             run_async_task(update_req_status())
         
         processing_time = time.time() - start_time
@@ -113,24 +133,43 @@ def process_single_wallet(address, time_range=7, include_metrics=None, request_i
         logger.exception(f"处理钱包 {address} 时出错: {str(e)}")
         return {"status": "error", "address": address, "error": str(e)}
     finally:
-        # 清理处理中标记，包含 chain
-        async def cleanup_processing():
-            await cache_service.delete(f"processing:{chain}:{address}")
-        
-        run_async_task(cleanup_processing())
+        run_async_task(cache_service.delete(f"processing:{chain}:{address}"))
 
 # 批量处理钱包的任务
 @celery_app.task(name="process_wallet_batch", bind=True)
-def process_wallet_batch(self, request_id, addresses, time_range=7, include_metrics=None, batch_index=0, chain="SOLANA"):
+def process_wallet_batch(
+    self, 
+    request_id, 
+    addresses, 
+    time_range=7, 
+    include_metrics=None, 
+    batch_index=0, 
+    chain="SOLANA",
+    twitter_names=None,  # 改為複數形式
+    twitter_usernames=None  # 改為複數形式
+):
     """處理一批錢包地址的Celery任務"""
     start_time = time.time()
     total_wallets = len(addresses)
     logger.info(f"==== 開始處理批次 {batch_index}, 包含 {total_wallets} 個地址，請求ID: {request_id} ====")
     logger.info(f"處理鏈：{chain}")
     
+    # 初始化 Twitter 資訊列表
+    twitter_names = twitter_names if twitter_names else [None] * len(addresses)
+    twitter_usernames = twitter_usernames if twitter_usernames else [None] * len(addresses)
+    
+    # 驗證 Twitter 資訊列表長度
+    if len(twitter_names) != len(addresses):
+        logger.warning(f"Twitter 名稱列表長度 ({len(twitter_names)}) 與地址列表長度 ({len(addresses)}) 不匹配")
+        twitter_names = twitter_names[:len(addresses)] if len(twitter_names) > len(addresses) else twitter_names + [None] * (len(addresses) - len(twitter_names))
+    
+    if len(twitter_usernames) != len(addresses):
+        logger.warning(f"Twitter 用戶名列表長度 ({len(twitter_usernames)}) 與地址列表長度 ({len(addresses)}) 不匹配")
+        twitter_usernames = twitter_usernames[:len(addresses)] if len(twitter_usernames) > len(addresses) else twitter_usernames + [None] * (len(addresses) - len(twitter_usernames))
+    
     results = []
     # 为每个地址创建单独的任务
-    for address in addresses:
+    for i, address in enumerate(addresses):
         # 使用apply_async而不是delay，以便指定队列和其他参数
         task = process_single_wallet.apply_async(
             args=[address], 
@@ -138,13 +177,14 @@ def process_wallet_batch(self, request_id, addresses, time_range=7, include_metr
                 "time_range": time_range,
                 "include_metrics": include_metrics,
                 "request_id": request_id,
-                "chain": chain  # 也需要將 chain 參數傳遞給 process_single_wallet
+                "chain": chain,
+                "twitter_name": twitter_names[i],  # 使用對應索引的 Twitter 名稱
+                "twitter_username": twitter_usernames[i]  # 使用對應索引的 Twitter 用戶名
             },
             queue="wallet_tasks"
         )
         results.append({"address": address, "task_id": task.id})
     
-    # logger.info(f"批次 {batch_index} 的 {len(addresses)} 个地址已全部提交")
     end_time = time.time()
     total_time = end_time - start_time
     

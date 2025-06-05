@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, BIGINT, Index, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, BIGINT, Index, Text, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.sql import func
 from datetime import datetime, timezone, timedelta
@@ -11,16 +11,16 @@ def get_utc8_time():
 
 class WalletSummary(Base):
     __tablename__ = 'wallet'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
 
     def __init__(self, **kwargs):
         for key, value in kwargs.items():
             setattr(self, key, value)
 
     id = Column(Integer, primary_key=True, comment='ID')
-    address = Column(String(512), nullable=False, unique=True, comment='錢包地址')
+    wallet_address = Column(String(512), nullable=False, unique=True, comment='錢包地址')
     balance = Column(Float, nullable=True, comment='錢包餘額')
-    balance_USD = Column(Float, nullable=True, comment='錢包餘額 (USD)')
+    balance_usd = Column(Float, nullable=True, comment='錢包餘額 (USD)')
     chain = Column(String(50), nullable=False, comment='區塊鏈類型')
     tag = Column(String(50), nullable=True, comment='標籤')
     twitter_name = Column(String(50), nullable=True, comment='X名稱')
@@ -100,7 +100,7 @@ class WalletSummary(Base):
 
 class Holding(Base):
     __tablename__ = 'wallet_holding'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     wallet_address = Column(String(255), nullable=False)  # 添加长度限制
@@ -128,7 +128,7 @@ class Holding(Base):
 class Transaction(Base):
     """交易記錄表，用於存儲所有交易"""
     __tablename__ = 'wallet_transaction'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
     
     id = Column(Integer, primary_key=True)
     wallet_address = Column(String(100), nullable=False, comment="聰明錢錢包地址")
@@ -161,29 +161,36 @@ class Transaction(Base):
 class TokenBuyData(Base):
     """代幣購買數據，用於追踪錢包持有的代幣購買成本"""
     __tablename__ = 'wallet_buy_data'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
     
     id = Column(Integer, primary_key=True)
     wallet_address = Column(String(100), nullable=False, comment="錢包地址")
+    chain = Column(String(50), nullable=False, comment="區塊鏈")
     token_address = Column(String(100), nullable=False, comment="代幣地址")
     total_amount = Column(Float, nullable=False, default=0.0, comment="當前持有代幣數量")
     total_cost = Column(Float, nullable=False, default=0.0, comment="當前持倉總成本")
     avg_buy_price = Column(Float, nullable=False, default=0.0, comment="當前持倉平均買入價格")
-    position_opened_at = Column(DateTime, nullable=True, comment="當前倉位開始時間")
+    position_opened_at = Column(BIGINT, nullable=True, comment="當前倉位開始時間")
     historical_total_buy_amount = Column(Float, nullable=False, default=0.0, comment="歷史總買入數量")
     historical_total_buy_cost = Column(Float, nullable=False, default=0.0, comment="歷史總買入成本")
     historical_total_sell_amount = Column(Float, nullable=False, default=0.0, comment="歷史總賣出數量")
     historical_total_sell_value = Column(Float, nullable=False, default=0.0, comment="歷史總賣出價值")
     historical_avg_buy_price = Column(Float, nullable=False, default=0.0, comment="歷史平均買入價格")
     historical_avg_sell_price = Column(Float, nullable=False, default=0.0, comment="歷史平均賣出價格")
-    last_active_position_closed_at = Column(DateTime, nullable=True, comment="上一個活躍倉位關閉時間")
-    last_transaction_time = Column(Integer, nullable=False, default=0.0, comment="最後活躍時間")
+    last_active_position_closed_at = Column(BIGINT, nullable=True, comment="上一個活躍倉位關閉時間")
+    last_transaction_time = Column(BIGINT, nullable=False, default=0.0, comment="最後活躍時間")
     realized_profit = Column(Float, default=0.0, comment="已實現利潤")
+    realized_profit_percentage = Column(Float, default=0.0, comment="已實現利潤百分比")
+    total_buy_count = Column(Integer, default=0, comment="總買入次數")
+    total_sell_count = Column(Integer, default=0, comment="總賣出次數")
+    total_holding_seconds = Column(BIGINT, default=0, comment="總持倉秒數")
+    chain_id = Column(Integer, nullable=False)
+    date = Column(DateTime)
     updated_at = Column(DateTime, nullable=False, default=get_utc8_time, comment="最後更新時間")
     
     __table_args__ = (
         UniqueConstraint('wallet_address', 'token_address', name='uix_wallet_token'),
-        {'schema': 'solana'}
+        {'schema': 'dex_query_v1'}
     )
     
     def __repr__(self):
@@ -192,7 +199,7 @@ class TokenBuyData(Base):
 class TransactionRecord(Base):
     """更細粒度的交易記錄表，用於存儲所有代幣交易"""
     __tablename__ = 'transaction_records'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
     
     id = Column(Integer, primary_key=True)
     wallet_address = Column(String(100), nullable=False, index=True)
@@ -210,3 +217,34 @@ class TransactionRecord(Base):
     
     def __repr__(self):
         return f"<TransactionRecord {self.transaction_hash[:10]}...>"
+
+class WalletTokenAnalysis(Base):
+    """錢包代幣交易分析結果表"""
+    __tablename__ = "wallet_token_analysis"
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    wallet_address = Column(String(255), nullable=False, index=True)
+    token_address = Column(String(255), nullable=False, index=True)
+    total_buy_amount = Column(Float, nullable=False, default=0)
+    total_buy_value = Column(Float, nullable=False, default=0)
+    avg_buy_price = Column(Float, nullable=False, default=0)
+    total_sell_amount = Column(Float, nullable=False, default=0)
+    total_sell_value = Column(Float, nullable=False, default=0)
+    avg_sell_price = Column(Float, nullable=False, default=0)
+    holding_amount = Column(Float, nullable=False, default=0)
+    holding_cost = Column(Float, nullable=False, default=0)
+    realized_pnl = Column(Float, nullable=False, default=0)
+    is_runner = Column(Boolean, nullable=False, default=False)
+    buy_transactions = Column(JSON, nullable=True)
+    sell_transactions = Column(JSON, nullable=True)
+    total_holding_seconds = Column(Integer, nullable=False, default=0)
+    buy_count = Column(Integer, nullable=False, default=0)
+    sell_count = Column(Integer, nullable=False, default=0)
+    pnl_percent = Column(Float, nullable=False, default=0)
+    last_updated = Column(Integer, nullable=False)
+    created_at = Column(DateTime, nullable=False, default=datetime.utcnow)
+    updated_at = Column(DateTime, nullable=False, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        UniqueConstraint('wallet_address', 'token_address', name='uix_wallet_token'),
+    )

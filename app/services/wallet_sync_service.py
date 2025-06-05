@@ -78,40 +78,23 @@ class WalletSyncService:
                 pass
                 
         logger.info("錢包同步服務已停止")
-    
-    # async def add_wallet(self, wallet_address: str):
-    #     """添加待同步的錢包地址"""
-    #     async with self.lock:
-    #         self.updated_wallets.add(wallet_address)
-            
-    #         # 如果緩存的錢包數量達到閾值，且距離上次同步已經過了一定時間，則立即觸發同步
-    #         current_time = time.time()
-    #         if (len(self.updated_wallets) >= self.max_batch_size and 
-    #             current_time - self.last_sync_time >= 5):  # 至少間隔5秒
-    #             asyncio.create_task(self._sync_wallets())
 
     async def add_wallet(self, wallet_address: str):
         """添加待同步的錢包地址，帶去抖動機制"""
-        # 首先確保錢包記錄存在
-        # from app.services.wallet_summary_service import wallet_summary_service
-        # await wallet_summary_service.ensure_wallet_exists(wallet_address)
         
         current_time = time.time()
         
         # 檢查是否需要去抖動
         last_update = self.wallet_update_times.get(wallet_address, 0)
         if current_time - last_update < self.debounce_interval:
-            # 更新時間但不立即同步
             self.wallet_update_times[wallet_address] = current_time
             self.wallet_update_counts[wallet_address] = self.wallet_update_counts.get(wallet_address, 0) + 1
             logger.debug(f"錢包 {wallet_address} 更新頻繁，應用去抖動")
             return
             
-        # 更新時間和計數
         self.wallet_update_times[wallet_address] = current_time
         self.wallet_update_counts[wallet_address] = 1
         
-        # 添加到待同步集合
         async with self.lock:
             self.updated_wallets.add(wallet_address)
             
@@ -119,13 +102,10 @@ class WalletSyncService:
             if len(self.updated_wallets) >= self.max_batch_size or current_time - self.last_sync_time >= self.sync_interval:
                 logger.info(f"待同步錢包數量: {len(self.updated_wallets)}，立即觸發同步")
                 
-                # 創建同步任務並保存引用
                 sync_task = asyncio.create_task(self._sync_wallets())
                 
-                # 添加完成回調，以便在任務完成時記錄結果
                 sync_task.add_done_callback(self._on_sync_task_done)
                 
-                # 不等待任務完成
                 logger.info(f"已創建同步任務 (ID: {id(sync_task)})，錢包 {wallet_address} 已添加到同步隊列")
                 return
         
@@ -134,7 +114,6 @@ class WalletSyncService:
     def _on_sync_task_done(self, task):
         """同步任務完成時的回調函數"""
         try:
-            # 獲取任務結果（如果有異常會引發）
             result = task.result()
             logger.info(f"同步任務 (ID: {id(task)}) 已完成")
         except asyncio.CancelledError:
@@ -142,26 +121,12 @@ class WalletSyncService:
         except Exception as e:
             logger.exception(f"同步任務 (ID: {id(task)}) 發生錯誤: {e}")
 
-    # async def _sync_loop(self):
-    #     """同步循環"""
-    #     try:
-    #         while self.running:
-    #             try:
-    #                 await asyncio.sleep(self.sync_interval)
-    #                 await self._sync_wallets()
-    #             except asyncio.CancelledError:
-    #                 raise
-    #             except Exception as e:
-    #                 logger.exception(f"錢包同步循環發生錯誤: {e}")
-    #                 await asyncio.sleep(10)  # 發生錯誤後等待10秒再重試
-    #     except asyncio.CancelledError:
-    #         logger.info("錢包同步循環被取消")
-    #         raise
-
     async def _sync_loop(self):
-        """同步循環，帶計數器重置"""
+        """同步循環，帶計數器重置和每日全量同步"""
         reset_interval = 86400  # 每天重置一次計數器
+        full_sync_interval = 86400  # 每天執行一次全量同步
         last_reset_time = time.time()
+        last_full_sync_time = time.time() - 86000
         
         try:
             logger.info("錢包同步循環已啟動")
@@ -175,6 +140,13 @@ class WalletSyncService:
                         self.wallet_update_times = {}
                         last_reset_time = current_time
                         logger.info("已重置錢包更新計數器")
+                    
+                    # 檢查是否需要執行全量同步
+                    if current_time - last_full_sync_time >= full_sync_interval:
+                        logger.info("開始執行錢包資料全量同步...")
+                        await self._sync_all_wallets()
+                        last_full_sync_time = current_time
+                        logger.info("錢包資料全量同步完成")
                     
                     # 檢查是否有待同步的錢包
                     async with self.lock:
@@ -208,7 +180,6 @@ class WalletSyncService:
                 logger.debug("沒有待同步的錢包，跳過同步")
                 return
                     
-            # 獲取待同步的錢包地址
             wallets_to_sync = list(self.updated_wallets)
             self.updated_wallets.clear()
             logger.info(f"從待同步集合中取出 {len(wallets_to_sync)} 個錢包地址")
@@ -220,7 +191,6 @@ class WalletSyncService:
         self.last_sync_time = time.time()
         
         try:
-            # 獲取錢包信息
             wallet_data = await self._get_wallet_data(wallets_to_sync)
             
             if not wallet_data:
@@ -229,13 +199,11 @@ class WalletSyncService:
                     
             # logger.info(f"成功獲取錢包數據 {wallet_data}，準備推送到外部 API")
                 
-            # 推送到外部 API
             success = await self._push_to_api(wallet_data)
             
             if success:
                 logger.info(f"成功同步 {len(wallet_data)} 個錢包信息到外部 API")
             else:
-                # 同步失敗，將錢包地址重新加入待同步集合
                 logger.error(f"同步錢包信息失敗，將重新嘗試")
                 async with self.lock:
                     self.updated_wallets.update(wallets_to_sync)
@@ -243,7 +211,6 @@ class WalletSyncService:
                 
         except Exception as e:
             logger.exception(f"同步錢包信息時發生錯誤: {e}")
-            # 發生錯誤，將錢包地址重新加入待同步集合
             async with self.lock:
                 self.updated_wallets.update(wallets_to_sync)
                 logger.info(f"發生錯誤，已將 {len(wallets_to_sync)} 個錢包地址重新加入待同步集合")
@@ -253,17 +220,14 @@ class WalletSyncService:
         result = []
         try:
             with self.session_factory() as session:
-                # 批量查詢錢包信息
                 wallet_summaries = session.execute(
-                    select(WalletSummary).where(WalletSummary.address.in_(wallet_addresses))
+                    select(WalletSummary).where(WalletSummary.wallet_address.in_(wallet_addresses))
                 ).scalars().all()
                 
                 logger.info(f"從數據庫查詢到 {len(wallet_summaries)} 個錢包信息")
                 
-                # 將錢包信息轉換為 API 所需格式
                 for wallet in wallet_summaries:
                     try:
-                        # 檢查是否有任何交易記錄
                         has_transactions = (
                             (wallet.total_transaction_num_30d or 0) > 0 or
                             (wallet.total_transaction_num_7d or 0) > 0 or
@@ -272,12 +236,12 @@ class WalletSyncService:
                         
                         # 如果沒有交易記錄，跳過這個錢包
                         if not has_transactions:
-                            logger.info(f"錢包 {wallet.address} 沒有交易記錄，跳過推送")
+                            logger.info(f"錢包 {wallet.wallet_address} 沒有交易記錄，跳過推送")
                             continue
 
                         # 創建新的字典，首先添加必填項
                         api_data = {
-                            "address": wallet.address,
+                            "address": wallet.wallet_address,
                             "chain": wallet.chain.upper() if wallet.chain else "SOLANA",
                             "last_transaction_time": wallet.last_transaction_time,
                             "isActive": wallet.is_active if wallet.is_active is not None else True,
@@ -288,8 +252,8 @@ class WalletSyncService:
                         if hasattr(wallet, "balance") and wallet.balance is not None:
                             api_data["balance"] = wallet.balance
                         
-                        if hasattr(wallet, "balance_USD") and wallet.balance_USD is not None:
-                            api_data["balanceUsd"] = wallet.balance_USD
+                        if hasattr(wallet, "balance_usd") and wallet.balance_usd is not None:
+                            api_data["balanceUsd"] = wallet.balance_usd
                         
                         # 添加標籤和社交媒體信息
                         if hasattr(wallet, "tag") and wallet.tag:
@@ -481,10 +445,10 @@ class WalletSyncService:
                         result.append(api_data)
                         
                     except Exception as e:
-                        logger.exception(f"處理錢包 {wallet.address} 數據時發生錯誤: {e}")
+                        logger.exception(f"處理錢包 {wallet.wallet_ddress} 數據時發生錯誤: {e}")
                         # 如果處理單個錢包數據失敗，仍然添加必填項
                         result.append({
-                            "address": wallet.address,
+                            "address": wallet.wallet_address,
                             "chain": wallet.chain.upper() if wallet.chain else "SOLANA",
                             "last_transaction_time": wallet.last_transaction_time,
                             "isActive": wallet.is_active if wallet.is_active is not None else True,
@@ -513,27 +477,22 @@ class WalletSyncService:
         headers = {"Content-Type": "application/json"}
         logger.info(f"準備推送 {len(wallet_data)} 個錢包數據到 API: {self.api_endpoint}")
         
-        # 記錄完整的請求數據（用於診斷）
         try:
             import json
-            logger.debug(f"請求數據: {json.dumps(wallet_data[:2])}")  # 只記錄前兩個錢包的數據
+            logger.debug(f"請求數據: {json.dumps(wallet_data[:2])}")
         except Exception as e:
             logger.error(f"序列化請求數據時發生錯誤: {e}")
         
-        # 確保 API 端點使用 HTTP 協議（對於本地服務器）
         if self.api_endpoint.startswith('https://') and ('127.0.0.1' in self.api_endpoint or 'localhost' in self.api_endpoint):
             self.api_endpoint = self.api_endpoint.replace('https://', 'http://')
             logger.info(f"檢測到本地服務器，已將 HTTPS 轉換為 HTTP: {self.api_endpoint}")
         
-        # 重試機制
         for retry, delay in enumerate(self.retry_intervals):
             try:
                 logger.info(f"嘗試推送數據到 API (嘗試 {retry+1}/{len(self.retry_intervals)})")
                 
-                # 創建 TCP 連接器，禁用 SSL 驗證
                 connector = aiohttp.TCPConnector(ssl=False)
                 
-                # 增加超時時間到 120 秒
                 timeout = aiohttp.ClientTimeout(total=120)
                 
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
@@ -556,11 +515,9 @@ class WalletSyncService:
                         else:
                             logger.error(f"API 請求失敗，狀態碼: {response.status}, 錯誤: {response_text}")
                             
-                            # 如果是最後一次重試，則返回失敗
                             if retry == len(self.retry_intervals) - 1:
                                 return False
                                 
-                            # 否則等待後重試
                             logger.info(f"將在 {delay} 秒後重試 (嘗試 {retry+1}/{len(self.retry_intervals)})")
                             await asyncio.sleep(delay)
                             
@@ -593,6 +550,62 @@ class WalletSyncService:
                 await asyncio.sleep(delay)
                 
         return False
+
+    async def _sync_all_wallets(self):
+        """同步所有活躍錢包到外部 API（每日全量同步）"""
+        try:
+            logger.info("開始全量同步所有錢包")
+            
+            with self.session_factory() as session:
+                # 分批查詢所有活躍錢包
+                batch_size = 50
+                offset = 0
+                total_synced = 0
+                
+                while True:
+                    # 查詢一批錢包地址
+                    wallets = session.execute(
+                        select(WalletSummary.wallet_address)
+                        .limit(batch_size)
+                        .offset(offset)
+                    ).scalars().all()
+                    
+                    if not wallets:
+                        logger.info(f"所有批次已處理完畢，共同步 {total_synced} 個錢包")
+                        break
+                        
+                    logger.info(f"全量同步：查詢到第 {offset}-{offset+len(wallets)} 批錢包，共 {len(wallets)} 個")
+                    
+                    # 將這批錢包地址轉換為列表
+                    wallet_addresses = list(wallets)
+                    
+                    # 直接獲取這批錢包的數據並推送到 API
+                    wallet_data = await self._get_wallet_data(wallet_addresses)
+                    
+                    if wallet_data:
+                        logger.info(f"全量同步：處理第 {offset+1}-{offset+len(wallet_data)} 批，準備推送 {len(wallet_data)} 個錢包數據")
+                        success = await self._push_to_api(wallet_data)
+                        
+                        if success:
+                            logger.info(f"全量同步：成功推送第 {offset+1}-{offset+len(wallet_data)} 批錢包數據")
+                            total_synced += len(wallet_data)
+                        else:
+                            logger.error(f"全量同步：推送第 {offset+1}-{offset+len(wallet_data)} 批錢包數據失敗")
+                            # 失敗時將地址添加到待更新集合，以便後續重試
+                            async with self.lock:
+                                self.updated_wallets.update(wallet_addresses)
+                    else:
+                        logger.warning(f"全量同步：第 {offset+1}-{offset+len(wallets)} 批無有效錢包數據")
+                    
+                    # 增加偏移量
+                    offset += batch_size
+                    
+                    # 簡短等待，避免數據庫和 API 服務器壓力
+                    await asyncio.sleep(2)
+                
+            logger.info(f"錢包資料全量同步完成，共同步 {total_synced} 個錢包")
+        except Exception as e:
+            logger.exception(f"全量同步錢包時發生錯誤: {e}")
 
 # 創建單例實例
 wallet_sync_service = WalletSyncService()

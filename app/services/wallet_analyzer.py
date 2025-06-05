@@ -10,6 +10,9 @@ from app.services.transaction_processor import transaction_processor
 import concurrent.futures
 from functools import lru_cache
 import math
+from sqlalchemy import update, func
+from app.core.db import get_session_factory
+from app.models.models import WalletSummary
 
 logger = logging.getLogger(__name__)
 cache_service = CacheService()
@@ -171,12 +174,22 @@ class WalletAnalyzer:
     async def _analyze_wallet_internal(
         self, 
         address: str, 
+        chain: str,
         time_range: int = 7,
         include_metrics: Optional[List[str]] = None,
-        chain: str = "solana"
+        twitter_name: Optional[str] = None,
+        twitter_username: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Internal method for analyzing a single wallet
+        
+        Args:
+            address: 錢包地址
+            time_range: 分析的時間範圍(天)
+            include_metrics: 需要包含的指標列表
+            chain: 鏈名稱
+            twitter_name: Twitter 名稱
+            twitter_username: Twitter 用戶名
         """
         try:
             # 獲取錢包活動記錄
@@ -273,6 +286,14 @@ class WalletAnalyzer:
                 holding_update_result = await transaction_processor.update_wallet_holdings(address, token_stats)
                 logger.info(f"錢包 {address} 持倉記錄更新結果: {holding_update_result}")
                 
+                # 更新錢包摘要
+                logger.info(f"正在更新錢包 {address} 的摘要資訊")
+                await transaction_processor.update_wallet_summary(
+                    wallet_address=address,
+                    twitter_name=twitter_name,
+                    twitter_username=twitter_username
+                )
+                
             except Exception as e:
                 logger.error(f"計算 {address} 代幣統計和勝率錯誤: {str(e)}")
                 metrics["token_stats"] = {}
@@ -330,20 +351,24 @@ class WalletAnalyzer:
     async def analyze_wallet(
         self, 
         address: str, 
+        chain: str,
         time_range: int = 7,
         include_metrics: Optional[List[str]] = None,
         use_cache: bool = True,
-        chain: str = "SOLANA"
+        twitter_name: Optional[str] = None,
+        twitter_username: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         分析單個錢包，計算指標
         
         Args:
             address: 錢包地址
+            chain: 鏈接名稱
             time_range: 分析的時間範圍(天)
             include_metrics: 需要包含的指標列表，如果為空則包含所有
             use_cache: 是否使用快取的交易數據
-            chain: 鏈接名稱
+            twitter_name: Twitter 名稱
+            twitter_username: Twitter 用戶名
         
         Returns:
             包含各種指標的字典
@@ -369,7 +394,6 @@ class WalletAnalyzer:
                         return await asyncio.wait_for(self._processing_tasks[address], timeout=60)
                     except asyncio.TimeoutError:
                         logger.warning(f"等待 {address} 分析超時，創建新任務")
-                        # 超時後繼續創建新任務
                     except Exception as e:
                         logger.error(f"等待 {address} 任務時出錯: {str(e)}")
                 
@@ -385,8 +409,28 @@ class WalletAnalyzer:
                     address, 
                     time_range=time_range,
                     include_metrics=include_metrics,
-                    chain=chain
+                    chain=chain,
+                    twitter_name=twitter_name,
+                    twitter_username=twitter_username
                 )
+                
+                # 如果提供了 Twitter 資訊，更新數據庫
+                if twitter_name or twitter_username:
+                    try:
+                        session_factory = get_session_factory()
+                        with session_factory() as session:
+                            stmt = update(WalletSummary).where(
+                                WalletSummary.wallet_address == address,
+                                WalletSummary.chain == chain
+                            ).values(
+                                twitter_name=twitter_name,
+                                twitter_username=twitter_username
+                            )
+                            session.execute(stmt)
+                            session.commit()
+                            logger.info(f"已更新錢包 {address} 的 Twitter 資訊")
+                    except Exception as e:
+                        logger.error(f"更新錢包 {address} 的 Twitter 資訊時出錯: {str(e)}")
                 
                 # 設置結果
                 if not future.done():
@@ -488,12 +532,14 @@ class WalletAnalyzer:
     async def analyze_wallet_batch(
         self, 
         addresses: List[str],
+        chain: str,
         time_range: int = 7,
         include_metrics: Optional[List[str]] = None,
         max_concurrent: int = 10,
-        chain: str = "solana",
         prefetch: bool = True,
-        prefetch_tokens: bool = True
+        prefetch_tokens: bool = True,
+        twitter_names: Optional[List[str]] = None,  # 改為複數形式
+        twitter_usernames: Optional[List[str]] = None  # 改為複數形式
     ) -> Dict[str, Dict[str, Any]]:
         """
         批量分析多個錢包
@@ -506,12 +552,35 @@ class WalletAnalyzer:
             chain: 鏈接名稱
             prefetch: 是否預先載入錢包資料
             prefetch_tokens: 是否預先載入代幣資料
+            twitter_names: Twitter 名稱列表
+            twitter_usernames: Twitter 用戶名列表
         
         Returns:
             地址到分析結果的映射
         """
         if not addresses:
             return {}
+        
+        # 初始化 Twitter 資訊列表
+        twitter_names = twitter_names if twitter_names else [None] * len(addresses)
+        twitter_usernames = twitter_usernames if twitter_usernames else [None] * len(addresses)
+        
+        # 驗證 Twitter 資訊列表長度
+        if len(twitter_names) != len(addresses):
+            logger.warning(f"Twitter 名稱列表長度 ({len(twitter_names)}) 與地址列表長度 ({len(addresses)}) 不匹配")
+            twitter_names = twitter_names[:len(addresses)] if len(twitter_names) > len(addresses) else twitter_names + [None] * (len(addresses) - len(twitter_names))
+        
+        if len(twitter_usernames) != len(addresses):
+            logger.warning(f"Twitter 用戶名列表長度 ({len(twitter_usernames)}) 與地址列表長度 ({len(addresses)}) 不匹配")
+            twitter_usernames = twitter_usernames[:len(addresses)] if len(twitter_usernames) > len(addresses) else twitter_usernames + [None] * (len(addresses) - len(twitter_usernames))
+        
+        # 創建地址到 Twitter 資訊的映射
+        twitter_info = {
+            addr: {
+                'name': name,
+                'username': username
+            } for addr, name, username in zip(addresses, twitter_names, twitter_usernames)
+        }
         
         import psutil
         cpu_count = psutil.cpu_count(logical=True)
@@ -625,7 +694,9 @@ class WalletAnalyzer:
                             addr, 
                             time_range=time_range,
                             include_metrics=include_metrics,
-                            chain=chain
+                            chain=chain,
+                            twitter_name=twitter_info[addr]['name'],
+                            twitter_username=twitter_info[addr]['username']
                         )
                     except Exception as e:
                         logger.exception(f"Error analyzing wallet {addr}: {str(e)}")

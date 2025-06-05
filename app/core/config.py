@@ -39,19 +39,19 @@ class Settings(BaseSettings):
     
     # CORS 配置
     CORS_ORIGINS: List[str] = ["*"]
-    
+
     # 資料庫配置 - 使用您提供的 DATABASE_URI_Solana
     DATABASE_URL: str = os.getenv("DATABASE_URI_Solana", "DATABASE_URL_SYNC")
     
     # 資料庫功能開關
     DB_ENABLED: bool = True
-    
-    SOLANA_RPC_URL: str = "https://methodical-capable-firefly.solana-mainnet.quiknode.pro/f660ad44a1d7512bb5f81c93144712e8ddc5c2dc"
-    SOLANA_RPC_URL_BACKUP: str = "https://patient-fabled-needle.solana-mainnet.quiknode.pro/befd34a7534b2733f326b0df7cf2fb89b979cbb7/"
+   
+    SOLANA_RPC_URL: str =  os.getenv("SOLANA_RPC_URL", "https://falling-damp-sound.solana-mainnet.quiknode.pro/2f4248baa9ee5737e1eff05d16dcd5b52d759adb/")
+    SOLANA_RPC_URL_BACKUP: str = os.getenv("SOLANA_RPC_URL_BACKUP", "http://13.113.243.82:64001")
 
     # Solscan API 配置
-    SOLSCAN_API_TOKEN: str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M"
-    SOLSCAN_API_URL: str = "https://pro-api.solscan.io/v2.0"
+    SOLSCAN_API_TOKEN: str = os.getenv("SOLSCAN_API_TOKEN", "1234567890")
+    SOLSCAN_API_URL: str = os.getenv("SOLSCAN_API_URL", "https://pro-api.solscan.io/v2.0")
 
     WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://moonx.backend:4200/internal/sync_kol_wallets")
 

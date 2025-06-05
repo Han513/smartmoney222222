@@ -197,6 +197,11 @@
 #             amount = float(event["txnValue"])
 #             timestamp = int(event["timestamp"])
             
+#             # 檢查並修正timestamp (如果是毫秒格式轉換為秒)
+#             if timestamp > 10**12:  # 判斷是否為毫秒時間戳 (13位數)
+#                 timestamp = timestamp // 1000
+#                 logger.info(f"轉換毫秒時間戳為秒: {event['timestamp']} -> {timestamp}")
+
 #             logger.info(f"處理交易: {wallet_address} {side} {amount} of {token_address} at {price}")
             
 #             # 構建基本交易數據
@@ -377,6 +382,7 @@ from app.core.config import settings
 from app.services.cache_service import cache_service
 from app.services.transaction_processor import transaction_processor
 from app.services.wallet_summary_service import wallet_summary_service
+from app.services.wallet_cache_service import wallet_cache_service
 
 logger = logging.getLogger(__name__)
 
@@ -551,10 +557,21 @@ class MessageProcessor:
             price = float(event["price"])
             amount = float(event["txnValue"])
             timestamp = int(event["timestamp"])
+            
+            # 檢查並修正timestamp (如果是毫秒格式轉換為秒)
+            if timestamp > 10**12:  # 判斷是否為毫秒時間戳 (13位數)
+                timestamp = timestamp // 1000
+                logger.info(f"轉換毫秒時間戳為秒: {event['timestamp']} -> {timestamp}")
+
+            # 檢查錢包地址是否存在
+            wallet_exists = await wallet_cache_service.is_wallet_exists(wallet_address)
+            if not wallet_exists:
+                logger.info(f"跳過處理不存在的錢包地址: {wallet_address}")
+                return True
 
             logger.info(f"處理交易: {wallet_address} {side} {amount} of {token_address} at {price}")
 
-            # 構建基本交易數據 (只包含必要字段，其餘由 save_transaction 方法補充)
+            # 構建基本交易數據
             transaction_data = {
                 "wallet_address": wallet_address,
                 "signature": txn_hash,
@@ -570,11 +587,10 @@ class MessageProcessor:
                 "from_token_amount": float(event.get("fromTokenAmount", 0)),
                 "dest_token_address": event.get("quoteMint", ""),
                 "dest_token_amount": float(event.get("toTokenAmount", 0)),
-                "value": price * amount  # 根據價格和數量計算價值
+                "value": price * amount
             }
 
-            # 使用 transaction_processor 保存交易 (裡面會計算所有必要字段)
-            # 注意: 因為 save_transaction 是同步方法，所以不用 await
+            # 使用 transaction_processor 保存交易
             save_result = await transaction_processor.save_transaction(transaction_data)
 
             if save_result:
@@ -586,7 +602,6 @@ class MessageProcessor:
                     timestamp
                 )
 
-                # 處理 TokenBuyData 已在 save_transaction 中處理過，無需重複處理
                 processing_time = time.time() - start_time
                 logger.info(f"完成處理消息 {message_id}，耗時: {processing_time:.2f}秒")
                 return True
