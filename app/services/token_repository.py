@@ -3,7 +3,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
-from sqlalchemy import Column, String, Integer, Float, BigInteger, DateTime, Text, Boolean, select, create_engine
+from sqlalchemy import Column, String, Integer, Float, BigInteger, DateTime, Text, Boolean, select, create_engine, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.exc import SQLAlchemyError
@@ -60,6 +60,11 @@ class TokenRepository:
         self.token_fetch_locks = {}  # 用於每個代幣的載入操作
         self.token_cache_updates = {}
         
+        # 初始化 Ian 資料庫連接（用於查詢 dex_query_v1.tokens 表）
+        self.ian_engine = None
+        self.ian_session_factory = None
+        self._init_ian_db_connection()
+        
         # 初始化數據庫引擎 - 改用同步 URL 和引擎
         try:
             # 檢查 DATABASE_URL_SYNC 環境變數，如果不存在則將 asyncpg 轉換為標準 postgresql
@@ -92,6 +97,51 @@ class TokenRepository:
             logger.error(f"初始化數據庫連接時發生錯誤: {e}")
             self.engine = None
             self.Session = None
+    
+    def _init_ian_db_connection(self) -> bool:
+        """
+        初始化 Ian 資料庫連接（用於查詢 dex_query_v1.tokens 表）
+        """
+        try:
+            if not settings.DATABASE_URI_Ian:
+                logger.warning("DATABASE_URI_Ian 未設定，無法查詢 tokens 表")
+                return False
+                
+            db_url = settings.DATABASE_URI_Ian
+            logger.info(f"初始化 Ian 資料庫連接用於代幣查詢: {db_url}")
+            
+            # 如果是異步 URL，轉換為同步 URL
+            if db_url.startswith('postgresql+asyncpg://'):
+                db_url = db_url.replace('postgresql+asyncpg://', 'postgresql://')
+                logger.info(f"轉換異步數據庫 URL 為同步 URL: {db_url}")
+            
+            self.ian_engine = create_engine(
+                db_url,
+                echo=False,
+                future=True,
+                pool_size=5,
+                max_overflow=10,
+                pool_timeout=30,
+                pool_recycle=1800,
+                pool_pre_ping=True
+            )
+            
+            self.ian_session_factory = sessionmaker(bind=self.ian_engine)
+            logger.info("Ian 資料庫引擎和會話工廠創建成功（代幣查詢）")
+            
+            # 測試連接
+            with self.ian_session_factory() as session:
+                session.execute(text("SELECT 1"))
+                session.commit()
+                
+            logger.info("Ian 資料庫連接測試成功（代幣查詢）")
+            return True
+            
+        except Exception as e:
+            logger.error(f"初始化 Ian 資料庫連接失敗（代幣查詢）: {str(e)}")
+            self.ian_engine = None
+            self.ian_session_factory = None
+            return False
     
     def load_tokens(self, force=False):
         """
@@ -172,7 +222,56 @@ class TokenRepository:
             if self.cache_expiry.get(address, current_time) > current_time:
                 return self.in_memory_cache[address]
         
-        # 3. 從數據庫同步獲取
+        # 3. 優先從 Ian 資料庫的 dex_query_v1.tokens 表查詢
+        if self.ian_session_factory:
+            try:
+                with self.ian_session_factory() as session:
+                    tokens_sql = text("""
+                        SELECT 
+                            address,
+                            name,
+                            symbol,
+                            decimals,
+                            logo,
+                            supply,
+                            price,
+                            market_cap,
+                            holder_count,
+                            created_time
+                        FROM dex_query_v1.tokens 
+                        WHERE address = :address
+                        LIMIT 1
+                    """)
+                    
+                    result = session.execute(tokens_sql, {"address": address}).fetchone()
+                    
+                    if result:
+                        token_info = {
+                            "address": result.address,
+                            "name": result.name,
+                            "symbol": result.symbol,
+                            "decimals": result.decimals or 9,
+                            "icon": result.logo,
+                            "supply": result.supply,
+                            "price": result.price,
+                            "market_cap": result.market_cap,
+                            "holder_count": result.holder_count,
+                            "created_time": result.created_time,
+                            "is_stable": False,
+                            "is_native": False
+                        }
+                        
+                        # 更新內存緩存
+                        self.in_memory_cache[address] = token_info
+                        self.cache_expiry[address] = datetime.now(UTC_PLUS_8) + timedelta(seconds=self.cache_ttl)
+                        
+                        logger.info(f"從 Ian 資料庫獲取到代幣信息: {address} - {token_info.get('symbol', 'Unknown')}")
+                        return token_info
+                        
+            except Exception as e:
+                logger.error(f"從 Ian 資料庫查詢代幣信息時出錯: {str(e)}")
+        
+        # 4. 從本地數據庫同步獲取
         if self.Session:
             try:
                 session = self.Session()
@@ -191,7 +290,7 @@ class TokenRepository:
             finally:
                 session.close()
         
-        # 4. 如果內存和數據庫都沒有，使用同步 HTTP 獲取
+        # 5. 如果內存和數據庫都沒有，使用同步 HTTP 獲取
         try:
             headers = {"token": self.api_token}
             url = f"{self.base_url}/token/meta?address={address}"
@@ -398,16 +497,62 @@ class TokenRepository:
                 if self.cache_expiry.get(token_address, current_time) > current_time:
                     return self.in_memory_cache[token_address]
             
-            # 嘗試從數據庫獲取
-            if self.Session:
-                session = None
+            # 優先從 Ian 資料庫的 dex_query_v1.tokens 表查詢
+            if self.ian_session_factory:
                 try:
-                    # 使用同步數據庫操作
+                    with self.ian_session_factory() as session:
+                        tokens_sql = text("""
+                            SELECT 
+                                address,
+                                name,
+                                symbol,
+                                decimals,
+                                logo,
+                                supply,
+                                price,
+                                market_cap,
+                                holder_count,
+                                created_time
+                            FROM dex_query_v1.tokens 
+                            WHERE address = :address
+                            LIMIT 1
+                        """)
+                        
+                        result = session.execute(tokens_sql, {"address": token_address}).fetchone()
+                        
+                        if result:
+                            token_info = {
+                                "address": result.address,
+                                "name": result.name,
+                                "symbol": result.symbol,
+                                "decimals": result.decimals or 9,
+                                "icon": result.logo,
+                                "supply": result.supply,
+                                "price": result.price,
+                                "market_cap": result.market_cap,
+                                "holder_count": result.holder_count,
+                                "created_time": result.created_time,
+                                "is_stable": False,
+                                "is_native": False
+                            }
+                            
+                            # 更新內存緩存
+                            self.in_memory_cache[token_address] = token_info
+                            self.cache_expiry[token_address] = datetime.now(UTC_PLUS_8) + timedelta(seconds=self.cache_ttl)
+                            
+                            logger.info(f"從 Ian 資料庫獲取到代幣信息: {token_address} - {token_info.get('symbol', 'Unknown')}")
+                            return token_info
+                            
+                except Exception as e:
+                    logger.error(f"從 Ian 資料庫查詢代幣信息時出錯: {str(e)}")
+            
+            # 嘗試從本地數據庫獲取
+            if self.Session:
+                try:
                     session = self.Session()
                     db_token = session.query(TokenInfo).filter(TokenInfo.address == token_address).first()
                     
-                    # 檢查是否過期（1天）
-                    if db_token and (current_time - db_token.updated_at).total_seconds() < 86400:
+                    if db_token:
                         token_data = db_token.as_dict()
                         
                         # 更新內存緩存
@@ -418,8 +563,7 @@ class TokenRepository:
                 except SQLAlchemyError as e:
                     logger.error(f"從數據庫查詢代幣信息時錯誤: {e}")
                 finally:
-                    if session:
-                        session.close()  # 確保連接被釋放
+                    session.close()  # 確保連接被釋放
             
             # 從 API 獲取
             try:

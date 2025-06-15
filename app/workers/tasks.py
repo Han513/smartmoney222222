@@ -30,33 +30,51 @@ celery_app.conf.update(
     worker_concurrency=4  # 允许多个并发worker
 )
 
-# 设置全局事件循环
-loop = None
-
 @worker_process_init.connect
 def init_worker(**kwargs):
     """Worker初始化时创建事件循环"""
-    global loop
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    logger.info("Worker已初始化事件循环")
+    logger.info("Worker已初始化")
 
 @worker_process_shutdown.connect
 def shutdown_worker(**kwargs):
     """Worker关闭时清理事件循环"""
-    global loop
-    if loop:
-        loop.close()
-    logger.info("Worker已关闭事件循环")
+    logger.info("Worker已关闭")
 
 # 异步任务包装器
 def run_async_task(coro):
     """运行异步任务的包装函数"""
-    global loop
-    if loop is None:
+    try:
+        # 嘗試獲取當前事件循環
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            # 如果事件循環正在運行，使用 asyncio.run_coroutine_threadsafe
+            import concurrent.futures
+            import threading
+            
+            # 創建一個新的線程來運行協程
+            def run_in_thread():
+                new_loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(new_loop)
+                try:
+                    return new_loop.run_until_complete(coro)
+                finally:
+                    new_loop.close()
+            
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(run_in_thread)
+                return future.result()
+        else:
+            # 如果事件循環沒有運行，直接運行
+            return loop.run_until_complete(coro)
+    except RuntimeError:
+        # 如果沒有事件循環，創建一個新的
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
-    return loop.run_until_complete(coro)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            # 不要關閉循環，讓它保持活躍以供後續使用
+            pass
 
 # 处理单个钱包的任务
 @celery_app.task(name="process_single_wallet")

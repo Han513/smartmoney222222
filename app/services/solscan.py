@@ -226,7 +226,8 @@ class SolscanClient:
                 
                 while not success and retry_count < max_retries:
                     try:
-                        async with session.get(full_url, timeout=30) as response:  # 增加超時時間
+                        timeout = aiohttp.ClientTimeout(total=30)
+                        async with session.get(full_url, timeout=timeout) as response:
                             if response.status == 200:
                                 data = await response.json()
                                 activities = data.get("data", []) if data.get("success") else []
@@ -409,7 +410,8 @@ class SolscanClient:
             retry_count = 0
             while retry_count < max_retries:
                 try:
-                    async with session.get(full_url, timeout=30) as response:
+                    timeout = aiohttp.ClientTimeout(total=30)
+                    async with session.get(full_url, timeout=timeout) as response:
                         if response.status == 200:
                             data = await response.json()
                             if data.get("success") and "data" in data:

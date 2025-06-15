@@ -22,6 +22,7 @@ class WalletSummary(Base):
     balance = Column(Float, nullable=True, comment='錢包餘額')
     balance_usd = Column(Float, nullable=True, comment='錢包餘額 (USD)')
     chain = Column(String(50), nullable=False, comment='區塊鏈類型')
+    chain_id = Column(Integer, nullable=True, comment='區塊鏈ID')
     tag = Column(String(50), nullable=True, comment='標籤')
     twitter_name = Column(String(50), nullable=True, comment='X名稱')
     twitter_username = Column(String(50), nullable=True, comment='X用戶名')
@@ -110,7 +111,7 @@ class Holding(Base):
     chain = Column(String(50), nullable=False, default='Unknown')  # 添加长度限制
     amount = Column(Float, nullable=False, default=0.0)
     value = Column(Float, nullable=False, default=0.0)
-    value_USDT = Column(Float, nullable=False, default=0.0)
+    value_usdt = Column(Float, nullable=False, default=0.0)
     unrealized_profits = Column(Float, nullable=False, default=0.0)
     pnl = Column(Float, nullable=False, default=0.0)
     pnl_percentage = Column(Float, nullable=False, default=0.0)

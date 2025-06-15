@@ -43,6 +43,9 @@ class Settings(BaseSettings):
     # 資料庫配置 - 使用您提供的 DATABASE_URI_Solana
     DATABASE_URL: str = os.getenv("DATABASE_URI_Solana", "DATABASE_URL_SYNC")
     
+    # Ian 資料庫配置 - 用於查詢 trades 表
+    DATABASE_URI_Ian: str = os.getenv("DATABASE_URI_Ian", "")
+    
     # 資料庫功能開關
     DB_ENABLED: bool = True
    

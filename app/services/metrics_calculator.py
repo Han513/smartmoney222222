@@ -73,8 +73,8 @@ class MetricsCalculator:
                 if is_buy:
                     # 買入 to_token
                     token_address = to_token_address
-                    amount = to_amount
-                    cost = from_amount
+                    amount = float(to_amount)  # 確保是 float 類型
+                    cost = float(from_amount)  # 確保是 float 類型
                     
                     token_data[token_address]["buy_count"] += 1
                     token_data[token_address]["total_buy_amount"] += amount
@@ -83,8 +83,8 @@ class MetricsCalculator:
                 else:
                     # 賣出 from_token
                     token_address = from_token_address
-                    amount = from_amount
-                    value = to_amount
+                    amount = float(from_amount)  # 確保是 float 類型
+                    value = float(to_amount)    # 確保是 float 類型
                     
                     token_data[token_address]["sell_count"] += 1
                     token_data[token_address]["total_sell_amount"] += amount
@@ -99,7 +99,7 @@ class MetricsCalculator:
                 
             elif activity_type == "token_transfer":
                 token_address = activity.get("token_address", "")
-                amount = activity.get("amount", 0)
+                amount = float(activity.get("amount", 0))  # 確保是 float 類型
                 is_incoming = activity.get("is_incoming", False)
                 timestamp = activity.get("block_time", 0)
                 
@@ -196,16 +196,16 @@ class MetricsCalculator:
                     if is_buy:
                         # 買入 to_token
                         token_address = to_token_address
-                        amount = to_amount
-                        cost = from_amount
+                        amount = float(to_amount)  # 確保是 float 類型
+                        cost = float(from_amount)  # 確保是 float 類型
                         
                         token_balance[token_address] += amount
                         token_cost[token_address] += cost
                     else:
                         # 賣出 from_token
                         token_address = from_token_address
-                        amount = from_amount
-                        value = to_amount
+                        amount = float(from_amount)  # 確保是 float 類型
+                        value = float(to_amount)    # 確保是 float 類型
                         
                         # 計算賣出的成本和收益
                         if token_balance[token_address] > 0:
@@ -229,7 +229,7 @@ class MetricsCalculator:
                 
                 elif activity_type == "token_transfer":
                     token_address = activity.get("token_address", "")
-                    amount = activity.get("amount", 0)
+                    amount = float(activity.get("amount", 0))  # 確保是 float 類型
                     is_incoming = activity.get("is_incoming", False)
                     
                     if not token_address:
@@ -310,16 +310,16 @@ class MetricsCalculator:
                 if is_buy:
                     # 買入 to_token
                     token_address = to_token_address
-                    amount = to_amount
-                    cost = from_amount
+                    amount = float(to_amount)  # 確保是 float 類型
+                    cost = float(from_amount)  # 確保是 float 類型
                     
                     token_balance_all[token_address] += amount
                     token_cost_all[token_address] += cost
                 else:
                     # 賣出 from_token
                     token_address = from_token_address
-                    amount = from_amount
-                    value = to_amount
+                    amount = float(from_amount)  # 確保是 float 類型
+                    value = float(to_amount)    # 確保是 float 類型
                     
                     # 計算賣出的成本和收益
                     if token_balance_all[token_address] > 0:

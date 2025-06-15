@@ -197,28 +197,40 @@ class WalletAnalyzer:
             await self._rate_limit_request()
             
             try:
-                activities = await solscan_client.get_all_wallet_activities(address)
-                logger.info(f"Retrieved {len(activities)} activities for address {address}")
+                # 優先從資料庫查詢交易記錄，如果沒有再使用 Solscan
+                logger.info(f"Processing transaction records for {address}")
+                transactions = await transaction_processor.process_wallet_activities(address)
                 
-                # 添加调试信息: 记录每种活动类型的数量
-                activity_types_count = {}
-                for activity in activities:
-                    activity_type = activity.get("activity_type", "UNKNOWN")
-                    activity_types_count[activity_type] = activity_types_count.get(activity_type, 0) + 1
-                
-                logger.info(f"Activity types count for {address}: {activity_types_count}")
-                
-                try:
-                    logger.info(f"Processing transaction records for {address}")
-                    transactions = await transaction_processor.process_wallet_activities(address, activities)
-                    logger.info(f"Processed {len(transactions)} transactions for {address}")
-                except Exception as e:
-                    logger.error(f"Error processing wallet transactions: {str(e)}")
-                    transactions = []  # 如果處理失敗，使用空列表
+                if transactions:
+                    logger.info(f"Processed {len(transactions)} transactions from database for {address}")
+                    # 將交易記錄轉換為 activities 格式以便後續指標計算
+                    activities = self._convert_transactions_to_activities(transactions)
+                    logger.info(f"Converted {len(transactions)} transactions to {len(activities)} activities")
+                else:
+                    # 如果資料庫沒有數據，嘗試從 Solscan 獲取
+                    logger.info(f"No data from database, trying Solscan for {address}")
+                    activities = await solscan_client.get_all_wallet_activities(address)
+                    logger.info(f"Retrieved {len(activities)} activities from Solscan for address {address}")
+                    
+                    if activities:
+                        # 添加调试信息: 记录每种活动类型的数量
+                        activity_types_count = {}
+                        for activity in activities:
+                            activity_type = activity.get("activity_type", "UNKNOWN")
+                            activity_types_count[activity_type] = activity_types_count.get(activity_type, 0) + 1
+                        
+                        logger.info(f"Activity types count for {address}: {activity_types_count}")
+                        
+                        # 使用 Solscan 數據處理
+                        transactions = await transaction_processor.process_wallet_activities(address, activities)
+                        logger.info(f"Processed {len(transactions)} transactions from Solscan for {address}")
+                    else:
+                        transactions = []
+                        activities = []
                 
             except Exception as e:
-                logger.error(f"Error fetching wallet activities: {str(e)}")
-                activities = []  # 如果獲取失敗，使用空列表
+                logger.error(f"Error processing wallet activities: {str(e)}")
+                activities = []
                 transactions = []
             
             # 如果沒有活動，返回模擬結果
@@ -781,6 +793,58 @@ class WalletAnalyzer:
             "complex": addresses[simple_count + medium_count:]
         }
     
+    def _convert_transactions_to_activities(self, transactions: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        將交易記錄轉換為 activities 格式，以便後續指標計算
+        
+        Args:
+            transactions: 交易記錄列表
+            
+        Returns:
+            activities 格式的列表
+        """
+        activities = []
+        
+        for tx in transactions:
+            try:
+                # 構建 activity 格式
+                activity = {
+                    "activity_type": "token_swap",
+                    "tx_hash": tx.get("signature", ""),
+                    "block_time": tx.get("transaction_time", 0),
+                    "from_token": {
+                        "address": tx.get("from_token_address", ""),
+                        "symbol": tx.get("from_token_symbol", ""),
+                        "amount": tx.get("from_token_amount", 0)
+                    },
+                    "to_token": {
+                        "address": tx.get("dest_token_address", ""),
+                        "symbol": tx.get("dest_token_symbol", ""),
+                        "amount": tx.get("dest_token_amount", 0)
+                    },
+                    "value": tx.get("value", 0),
+                    "amount": tx.get("amount", 0),
+                    "price": tx.get("price", 0),
+                    "transaction_type": tx.get("transaction_type", ""),
+                    "token_address": tx.get("token_address", ""),
+                    "token_name": tx.get("token_name", ""),
+                    "token_icon": tx.get("token_icon", ""),
+                    "marketcap": tx.get("marketcap", 0),
+                    "realized_profit": tx.get("realized_profit", 0),
+                    "realized_profit_percentage": tx.get("realized_profit_percentage", 0)
+                }
+                
+                activities.append(activity)
+                
+            except Exception as e:
+                logger.warning(f"轉換交易記錄到 activity 格式時出錯: {str(e)}")
+                continue
+        
+        # 按時間排序（最新的在前）
+        activities.sort(key=lambda x: x.get("block_time", 0), reverse=True)
+        
+        return activities
+
     async def close(self):
         """清理資源"""
         # 設置一個內部關閉標誌

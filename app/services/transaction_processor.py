@@ -9,7 +9,7 @@ import sqlalchemy
 from datetime import datetime, timezone, timedelta
 from decimal import Decimal, getcontext
 from typing import Dict, List, Any, Optional, Tuple
-from sqlalchemy import create_engine, select, update, and_, exists, text
+from sqlalchemy import create_engine, select, update, and_, exists, text, func, delete, or_
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.pool import QueuePool
 from sqlalchemy.dialects.postgresql import insert 
@@ -22,6 +22,8 @@ from solana.rpc.async_api import AsyncClient
 from app.services.cache_service import cache_service
 from app.services.wallet_summary_service import wallet_summary_service
 import aiohttp
+import pandas as pd
+import traceback
 
 # 設置 Decimal 精度
 getcontext().prec = 28
@@ -60,6 +62,13 @@ class TransactionProcessor:
         logger.info(f"從 settings 獲取的 DATABASE_URL: {db_url_from_settings}")
         logger.info(f"所有與DATABASE相關的環境變數: {all_env_keys}")
         
+        # Ian 資料庫連接（用於查詢 trades 表）
+        self.ian_engine = None
+        self.ian_session_factory = None
+        self._ian_connection_tested_successfully = False
+        db_uri_ian = os.getenv('DATABASE_URI_Ian', '未設定')
+        logger.info(f"環境變數 DATABASE_URI_Ian: {db_uri_ian}")
+        
         self.token_info_cache = {}
         self.token_info_cache = {
         "So11111111111111111111111111111111111111112": {
@@ -92,6 +101,15 @@ class TransactionProcessor:
         self.running = False
         self.pending_events = []
         self.last_send_time = time.time()
+        
+        # 添加穩定幣和 WSOL 地址常量
+        self.STABLES = {
+            'EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v',  # USDC
+            'Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB',  # USDT
+            '4k3Dyjzvzp8eMZWUXbBCjEvwSkkk59S5iCNLY3QrkX6R',  # RAY
+            'So11111111111111111111111111111111111111112',   # SOL
+        }
+        self.WSOL = 'So11111111111111111111111111111111111111112'
     
     def activate(self):
         """激活交易處理器，啟動事件處理循環"""
@@ -102,6 +120,9 @@ class TransactionProcessor:
         logger.info("激活 TransactionProcessor...")
         self._activated = True
         self._init_db_connection()
+        
+        # 初始化 Ian 資料庫連接
+        self._init_ian_db_connection()
         
         # 啟動事件處理循環
         self.running = True
@@ -265,6 +286,66 @@ class TransactionProcessor:
         self.engine = None
         self.session_factory = None
         self._connection_tested_successfully = False
+        
+                # 關閉 Ian 資料庫連接
+        if self.ian_engine:
+            logger.info("關閉 Ian 資料庫連接")
+            self.ian_engine.dispose()
+        self.ian_engine = None
+        self.ian_session_factory = None
+        self._ian_connection_tested_successfully = False
+        
+    def _init_ian_db_connection(self) -> bool:
+        """
+        初始化 Ian 資料庫連接（用於查詢 trades 表）
+        """
+        if self._ian_connection_tested_successfully:
+            return True
+            
+        if not settings.DATABASE_URI_Ian:
+            logger.warning("DATABASE_URI_Ian 未設定，無法查詢 trades 表")
+            return False
+            
+        if self.ian_engine is None or self.ian_session_factory is None:
+            try:
+                db_url = settings.DATABASE_URI_Ian
+                logger.info(f"初始化 Ian 資料庫連接: {db_url}")
+                
+                # 如果是異步 URL，轉換為同步 URL
+                if db_url.startswith('postgresql+asyncpg://'):
+                    db_url = db_url.replace('postgresql+asyncpg://', 'postgresql://')
+                    logger.info(f"轉換異步數據庫 URL 為同步 URL: {db_url}")
+                
+                self.ian_engine = create_engine(
+                    db_url,
+                    echo=False,
+                    future=True,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_timeout=30,
+                    pool_recycle=1800,
+                    pool_pre_ping=True
+                )
+                
+                self.ian_session_factory = sessionmaker(bind=self.ian_engine)
+                logger.info("Ian 資料庫引擎和會話工廠創建成功")
+                
+                # 測試連接
+                with self.ian_session_factory() as session:
+                    session.execute(text("SELECT 1"))
+                    session.commit()
+                    
+                self._ian_connection_tested_successfully = True
+                logger.info("Ian 資料庫連接測試成功")
+                return True
+                
+            except Exception as e:
+                logger.error(f"初始化 Ian 資料庫連接失敗: {str(e)}")
+                self.ian_engine = None
+                self.ian_session_factory = None
+                return False
+                
+        return self._ian_connection_tested_successfully
     
     def get_wallet_balance(self, wallet_address: str) -> Dict[str, Any]:
         """獲取錢包餘額數據"""
@@ -320,15 +401,51 @@ class TransactionProcessor:
             logger.exception(f"獲取 {wallet_address}/{token_address} 購買數據時發生錯誤: {e}")
             return {}
 
-    async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """處理錢包活動 - 使用本地緩存計算利潤"""
-        logger.info(f"處理錢包 {wallet_address} 的 {len(activities)} 筆活動")
+    async def process_wallet_activities(self, wallet_address: str, activities: List[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        """處理錢包活動 - 優先從資料庫查詢，如果沒有數據再使用 Solscan"""
+        logger.info(f"開始處理錢包 {wallet_address} 的交易記錄")
         
+        # 優先從資料庫查詢交易記錄
+        try:
+            logger.info(f"嘗試從資料庫查詢錢包 {wallet_address} 的交易記錄")
+            trades_from_db = await self.fetch_trades_from_db(wallet_address)
+            
+            if trades_from_db:
+                logger.info(f"從資料庫查詢到 {len(trades_from_db)} 筆交易記錄")
+                
+                # 標準化交易記錄
+                normalized_trades = []
+                for trade in trades_from_db:
+                    normalized_trade = self.normalize_trade(trade)
+                    if normalized_trade:
+                        normalized_trades.append(normalized_trade)
+                
+                # 轉換為 Transaction 格式
+                transaction_records = await self.convert_trades_to_transactions(normalized_trades, wallet_address)
+                
+                if transaction_records:
+                    logger.info(f"成功從資料庫獲取並轉換了 {len(transaction_records)} 筆交易記錄")
+                    
+                    # 保存到 wallet_transaction 表
+                    try:
+                        save_result = await self.save_transactions_batch(transaction_records)
+                        logger.info(f"批量保存交易記錄結果: {save_result}")
+                    except Exception as e:
+                        logger.error(f"保存交易記錄失敗: {str(e)}")
+                    
+                    return transaction_records
+                
+        except Exception as e:
+            logger.warning(f"從資料庫查詢交易記錄失敗: {str(e)}，將使用 Solscan 作為備選方案")
+        
+        # 如果資料庫查詢失敗或沒有數據，使用 Solscan 數據
         if not activities:
             logger.info(f"錢包 {wallet_address} 沒有活動記錄，創建空摘要")
             from app.services.wallet_summary_service import wallet_summary_service
             await wallet_summary_service.create_empty_wallet_summary(wallet_address)
             return []
+        
+        logger.info(f"使用 Solscan 數據處理錢包 {wallet_address} 的 {len(activities)} 筆活動")
         
         start_time = time.time()
         max_processing_time = 120  # 設置處理超時時間
@@ -435,13 +552,14 @@ class TransactionProcessor:
                             transaction_data_batch = []
                 
                 elif activity_type == 'token_transfer':
-                    # 同樣使用緩存處理代幣轉帳
-                    result = self._process_token_transfer_with_cache(
-                        wallet_address, activity, token_cache, token_buy_cache
-                    )
+                    # 處理代幣轉帳
+                    result = self._process_token_transfer(wallet_address, activity)
                     
                     if result and result.get("success"):
                         processed_transactions.append(result)
+                        # 收集交易數據以批量保存
+                        if "transaction_data" in result:
+                            transaction_data_batch.append(result["transaction_data"])
                         self._collect_token_transfer_update(result, token_updates)
                 
                 # 其他活動類型...
@@ -486,6 +604,14 @@ class TransactionProcessor:
                     await self.save_single_transaction(tx_data)
                 except Exception as single_err:
                     logger.warning(f"保存單個交易時出錯 (簽名: {tx_data.get('signature')}): {str(single_err)}")
+
+    async def save_single_transaction(self, tx_data: Dict[str, Any]) -> bool:
+        """保存單個交易到資料庫"""
+        try:
+            return await self.save_transactions_batch([tx_data])
+        except Exception as e:
+            logger.error(f"保存單個交易失敗: {str(e)}")
+            return False
 
     # 帶緩存的代幣交換處理方法
     def _process_token_swap_cached(self, wallet_address, activity_data, wallet_balance, token_cache):
@@ -874,10 +1000,14 @@ class TransactionProcessor:
                         time_now = datetime.now(tz_utc8)
                         tx_data["time"] = time_now.strftime('%Y-%m-%d %H:%M:%S.%f')
                     
+                    # 確保 chain 欄位不為空
+                    if not tx_data.get("chain"):
+                        tx_data["chain"] = "SOLANA"
+                    
                     try:
                         # 使用原始SQL進行UPSERT，包含分區鍵
                         upsert_sql = text("""
-                            INSERT INTO solana.wallet_transaction (
+                            INSERT INTO dex_query_v1.wallet_transaction (
                                 wallet_address, wallet_balance, signature, transaction_time, 
                                 transaction_type, token_address, token_name, token_icon, 
                                 marketcap, amount, value, price, holding_percentage, 
@@ -928,7 +1058,7 @@ class TransactionProcessor:
                         # 如果UPSERT失敗，使用查詢-插入/更新方法
                         try:
                             check_sql = text("""
-                                SELECT id FROM solana.wallet_transaction 
+                                SELECT id FROM dex_query_v1.wallet_transaction 
                                 WHERE signature = :signature 
                                 AND wallet_address = :wallet_address 
                                 AND token_address = :token_address
@@ -942,7 +1072,7 @@ class TransactionProcessor:
                             
                             if existing:
                                 update_sql = text("""
-                                    UPDATE solana.wallet_transaction SET
+                                    UPDATE dex_query_v1.wallet_transaction SET
                                         wallet_balance = :wallet_balance,
                                         transaction_type = :transaction_type,
                                         token_name = :token_name,
@@ -964,7 +1094,7 @@ class TransactionProcessor:
                             else:
                                 # 插入
                                 insert_sql = text("""
-                                    INSERT INTO solana.wallet_transaction (
+                                    INSERT INTO dex_query_v1.wallet_transaction (
                                         wallet_address, wallet_balance, signature, transaction_time, 
                                         transaction_type, token_address, token_name, token_icon, 
                                         marketcap, amount, value, price, holding_percentage, 
@@ -985,10 +1115,12 @@ class TransactionProcessor:
                                 
                         except Exception as inner_e:
                             if not first_error_logged:
-                                logger.error(f"[FIRST ERROR][FALLBACK] 替代方法處理交易 {signature} 失敗: {str(inner_e)}\nSQL: {insert_sql}\n參數: {tx_data}", exc_info=True)
+                                logger.error(f"[FIRST ERROR][FALLBACK] 替代方法處理交易 {signature} 失敗: {str(inner_e)}", exc_info=True)
                                 first_error_logged = True
                             else:
                                 logger.error(f"替代方法處理交易 {signature} 失敗: {str(inner_e)}")
+                            # 記錄錯誤但不回滾，讓其他交易繼續處理
+                            continue
                 # 提交所有變更
                 session.commit()
                 
@@ -998,7 +1130,10 @@ class TransactionProcessor:
                 
         except Exception as e:
             logger.error(f"批量UPSERT交易失敗，錯誤: {str(e)}", exc_info=True)
-            session.rollback()
+            try:
+                session.rollback()
+            except Exception as rollback_error:
+                logger.error(f"回滾交易時發生錯誤: {rollback_error}")
             return False
 
     def _process_token_swap_with_cache(self, wallet_address, activity_data, wallet_balance, token_cache, token_buy_cache):
@@ -1071,7 +1206,7 @@ class TransactionProcessor:
                     "historical_sell_amount": Decimal('0'),
                     "historical_sell_value": Decimal('0'),
                     "realized_profit": Decimal('0'),
-                    "last_transaction_time": timestamp
+                    "last_transaction_time": int(timestamp)  # 確保是整數類型
                 }
             
             token_buy_info = token_buy_cache[token_address]
@@ -1118,7 +1253,7 @@ class TransactionProcessor:
             else:
                 token_buy_info["avg_buy_price"] = Decimal('0')
             
-            token_buy_info["last_transaction_time"] = max(token_buy_info["last_transaction_time"], timestamp)
+            token_buy_info["last_transaction_time"] = max(int(token_buy_info["last_transaction_time"]), int(timestamp))
             
             # 計算 holding_percentage
             holding_percentage = 0
@@ -1302,10 +1437,41 @@ class TransactionProcessor:
             # 設置活動類型
             activity_type = 'receive' if is_incoming else 'send'
             
+            # 獲取代幣資訊
+            token_name = self.get_token_symbol(token_address)
+            token_icon = self.get_token_icon(token_address)
+            
+            # 創建交易資料
+            transaction_data = {
+                "wallet_address": wallet_address,
+                "wallet_balance": 0,  # 轉帳交易不涉及錢包餘額變化
+                "signature": transaction_hash,
+                "transaction_time": timestamp,
+                "transaction_type": activity_type,
+                "from_token_address": from_address if not is_incoming else token_address,
+                "from_token_symbol": token_name if not is_incoming else token_name,
+                "from_token_amount": float(amount) if not is_incoming else 0,
+                "dest_token_address": to_address if is_incoming else token_address,
+                "dest_token_symbol": token_name if is_incoming else token_name,
+                "dest_token_amount": float(amount) if is_incoming else 0,
+                "token_address": token_address,
+                "token_name": token_name,
+                "token_icon": token_icon,
+                "amount": float(amount),
+                "value": 0,  # 轉帳交易沒有價值
+                "price": 0,  # 轉帳交易沒有價格
+                "marketcap": 0,
+                "holding_percentage": 0,
+                "realized_profit": 0,
+                "realized_profit_percentage": 0,
+                "chain": "SOLANA"
+            }
+            
             # 創建交易記錄
             return {
                 "success": True,
                 "transaction_hash": transaction_hash,
+                "transaction_data": transaction_data,
                 "token_address": token_address,
                 "amount": float(amount),
                 "type": activity_type,
@@ -2094,7 +2260,7 @@ class TransactionProcessor:
                             holding = holding_map[token_address]
                             holding.amount = float(balance)
                             holding.value = float(value)
-                            holding.value_USDT = float(value_USDT)
+                            holding.value_usdt = float(value_USDT)
                             holding.unrealized_profits = float(unrealized_profits)
                             holding.pnl = float(pnl)
                             holding.pnl_percentage = float(pnl_percentage)
@@ -2121,7 +2287,7 @@ class TransactionProcessor:
                                 chain="SOLANA",
                                 amount=float(balance),
                                 value=float(value),
-                                value_USDT=float(value_USDT),
+                                value_usdt=float(value_USDT),
                                 unrealized_profits=float(unrealized_profits),
                                 pnl=float(pnl),
                                 pnl_percentage=float(pnl_percentage),
@@ -2321,7 +2487,65 @@ class TransactionProcessor:
             
             if not transactions:
                 logger.info(f"錢包 {wallet_address} 沒有交易記錄")
-                return {}
+                # 返回預設值而不是空字典
+                return {
+                    "last_transaction_time": None,
+                    "total_transaction_num_30d": 0,
+                    "total_transaction_num_7d": 0,
+                    "total_transaction_num_1d": 0,
+                    "buy_num_30d": 0,
+                    "buy_num_7d": 0,
+                    "buy_num_1d": 0,
+                    "sell_num_30d": 0,
+                    "sell_num_7d": 0,
+                    "sell_num_1d": 0,
+                    "pnl_30d": 0,
+                    "pnl_7d": 0,
+                    "pnl_1d": 0,
+                    "pnl_percentage_30d": 0,
+                    "pnl_percentage_7d": 0,
+                    "pnl_percentage_1d": 0,
+                    "unrealized_profit_30d": 0,
+                    "unrealized_profit_7d": 0,
+                    "unrealized_profit_1d": 0,
+                    "total_cost_30d": 0,
+                    "total_cost_7d": 0,
+                    "total_cost_1d": 0,
+                    "avg_cost_30d": 0,
+                    "avg_cost_7d": 0,
+                    "avg_cost_1d": 0,
+                    "avg_realized_profit_30d": 0,
+                    "avg_realized_profit_7d": 0,
+                    "avg_realized_profit_1d": 0,
+                    "win_rate_30d": 0,
+                    "win_rate_7d": 0,
+                    "win_rate_1d": 0,
+                    "distribution_lt50_30d": 0,
+                    "distribution_0to50_30d": 0,
+                    "distribution_0to200_30d": 0,
+                    "distribution_200to500_30d": 0,
+                    "distribution_gt500_30d": 0,
+                    "distribution_lt50_percentage_30d": 0,
+                    "distribution_0to50_percentage_30d": 0,
+                    "distribution_0to200_percentage_30d": 0,
+                    "distribution_200to500_percentage_30d": 0,
+                    "distribution_gt500_percentage_30d": 0,
+                    "distribution_lt50_7d": 0,
+                    "distribution_0to50_7d": 0,
+                    "distribution_0to200_7d": 0,
+                    "distribution_200to500_7d": 0,
+                    "distribution_gt500_7d": 0,
+                    "distribution_lt50_percentage_7d": 0,
+                    "distribution_0to50_percentage_7d": 0,
+                    "distribution_0to200_percentage_7d": 0,
+                    "distribution_200to500_percentage_7d": 0,
+                    "distribution_gt500_percentage_7d": 0,
+                    "asset_multiple": 0,
+                    "pnl_pic_30d": "",
+                    "pnl_pic_7d": "",
+                    "pnl_pic_1d": "",
+                    "token_list": None
+                }
             
             # 最後交易時間
             stats["last_transaction_time"] = transactions[0].transaction_time
@@ -2716,7 +2940,7 @@ class TransactionProcessor:
                         'decimals': 9,
                         'balance': {
                             'int': sol_balance,
-                            'float': float(usd_value)  # USD 价值
+                            'float': float(usd_value)
                         },
                         'lamports': lamports
                     }
@@ -2792,6 +3016,306 @@ class TransactionProcessor:
         except Exception as e:
             logger.error(f"運行異步協程時出錯: {e}")
             return None
+
+    async def fetch_trades_from_db(self, wallet_address: str, min_timestamp: int = None) -> List[Dict[str, Any]]:
+        """
+        從 dex_query_v1.trades 表查詢錢包交易記錄
+        
+        Args:
+            wallet_address: 錢包地址
+            min_timestamp: 最小時間戳，用於過濾交易記錄
+            
+        Returns:
+            交易記錄列表
+        """
+        try:
+            # 初始化 Ian 資料庫連接
+            if not self._init_ian_db_connection():
+                logger.error("Ian 資料庫連接未初始化，無法查詢 trades 表")
+                return []
+            
+            # 計算30天前的時間戳
+            if min_timestamp is None:
+                min_timestamp = int(time.time()) - (30 * 24 * 60 * 60)
+            
+            # 構建查詢 SQL
+            trades_sql = text("""
+                SELECT 
+                    signer,
+                    token_in,
+                    token_out,
+                    CASE WHEN side = 0 THEN token_in ELSE token_out END AS token_address,
+                    CASE WHEN side = 0 THEN 'buy' ELSE 'sell' END AS side,
+                    amount_in,
+                    amount_out,
+                    price,
+                    price_usd,
+                    decimals_in,
+                    decimals_out,
+                    timestamp,
+                    tx_hash,
+                    chain_id
+                FROM dex_query_v1.trades
+                WHERE signer = :wallet_address 
+                AND timestamp >= :min_timestamp
+                AND chain_id = 501
+                ORDER BY timestamp DESC
+            """)
+            
+            with self.ian_session_factory() as session:
+                result = session.execute(trades_sql, {
+                    'wallet_address': wallet_address,
+                    'min_timestamp': min_timestamp
+                })
+                
+                trades_data = []
+                for row in result:
+                    trades_data.append({
+                        'signer': row.signer,
+                        'token_in': row.token_in,
+                        'token_out': row.token_out,
+                        'token_address': row.token_address,
+                        'side': row.side,
+                        'amount_in': row.amount_in,
+                        'amount_out': row.amount_out,
+                        'price': row.price,
+                        'price_usd': row.price_usd,
+                        'decimals_in': row.decimals_in or 0,
+                        'decimals_out': row.decimals_out or 0,
+                        'timestamp': row.timestamp,
+                        'tx_hash': row.tx_hash,
+                        'chain_id': row.chain_id
+                    })
+                
+                logger.info(f"從 Ian 資料庫查詢到 {len(trades_data)} 筆交易記錄 for {wallet_address}")
+                return trades_data
+                
+        except Exception as e:
+            logger.error(f"從 Ian 資料庫查詢交易記錄失敗: {str(e)}")
+            return []
+    
+    def normalize_trade(self, row: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        標準化交易記錄，轉換為統一格式
+        
+        Args:
+            row: 原始交易記錄
+            
+        Returns:
+            標準化後的交易記錄
+        """
+        try:
+            tx_hash = row['tx_hash']
+            token_in = row['token_in']
+            token_out = row['token_out']
+            decimals_in = row.get('decimals_in', 0) or 0
+            decimals_out = row.get('decimals_out', 0) or 0
+            side = row['side']
+            price = row['price_usd'] if row.get('price_usd') and row['price_usd'] > 0 else row['price']
+            signer = row['signer']
+            chain_id = row['chain_id']
+            timestamp = row['timestamp']
+
+            in_is_stable_or_wsol = token_in in self.STABLES or token_in == self.WSOL
+            out_is_stable_or_wsol = token_out in self.STABLES or token_out == self.WSOL
+            in_is_non_stable = not in_is_stable_or_wsol
+            out_is_non_stable = not out_is_stable_or_wsol
+
+            if (in_is_stable_or_wsol and out_is_non_stable):
+                token_address = token_out
+                direction = 'buy'
+                amount_in = row['amount_in'] / (10 ** decimals_in)
+                amount_out = row['amount_out'] / (10 ** decimals_out)
+                amount = amount_out
+            elif (out_is_stable_or_wsol and in_is_non_stable):
+                token_address = token_in
+                direction = 'sell'
+                amount_in = row['amount_in'] / (10 ** decimals_in)
+                amount_out = row['amount_out'] / (10 ** decimals_out)
+                amount = amount_in
+            elif in_is_non_stable and out_is_non_stable:
+                if side == 'buy':
+                    token_address = token_out
+                    direction = 'buy'
+                    amount_in = row['amount_in'] / (10 ** decimals_in)
+                    amount_out = row['amount_out'] / (10 ** decimals_out)
+                    amount = amount_out
+                else:
+                    token_address = token_in
+                    direction = 'sell'
+                    amount_in = row['amount_in'] / (10 ** decimals_in)
+                    amount_out = row['amount_out'] / (10 ** decimals_out)
+                    amount = amount_in
+            else:
+                token_address = token_out
+                direction = 'buy' if side == 'buy' else 'sell'
+                amount_in = row['amount_in'] / (10 ** decimals_in)
+                amount_out = row['amount_out'] / (10 ** decimals_out)
+                amount = amount_out if direction == 'buy' else amount_in
+
+            return {
+                'tx_hash': tx_hash,
+                'signer': signer,
+                'token_address': token_address,
+                'side': direction,
+                'token_in': token_in,
+                'token_out': token_out,
+                'amount_in': amount_in,
+                'amount_out': amount_out,
+                'amount': amount,
+                'price': price,
+                'timestamp': timestamp,
+                'chain_id': chain_id,
+            }
+        except Exception as e:
+            logger.error(f"標準化交易記錄失敗: {str(e)}")
+            return None
+    
+    def get_chain_name(self, chain_id: int) -> str:
+        """根據 chain_id 獲取鏈名稱"""
+        chain_mapping = {
+            501: 'SOLANA',
+            56: 'BSC',
+            1: 'ETH',
+            8453: 'BASE',
+            195: 'TRON'
+        }
+        return chain_mapping.get(chain_id, 'UNKNOWN')
+    
+    async def convert_trades_to_transactions(self, trades: List[Dict[str, Any]], wallet_address: str) -> List[Dict[str, Any]]:
+        """
+        將交易記錄轉換為 Transaction 表格式
+        
+        Args:
+            trades: 標準化後的交易記錄列表
+            wallet_address: 錢包地址
+            
+        Returns:
+            Transaction 格式的交易記錄列表
+        """
+        if not trades:
+            return []
+        
+        try:
+            # 獲取所有涉及的代幣地址
+            all_token_addresses = set()
+            for trade in trades:
+                all_token_addresses.add(trade['token_address'])
+                all_token_addresses.add(trade['token_in'])
+                all_token_addresses.add(trade['token_out'])
+            
+            # 批量獲取代幣資訊
+            token_info_dict = {}
+            try:
+                token_info_dict = await token_repository.get_multiple_token_info(list(all_token_addresses))
+            except Exception as e:
+                logger.warning(f"批量獲取代幣資訊失敗: {str(e)}")
+            
+            # 獲取錢包餘額
+            wallet_balance = 0
+            try:
+                balance_info = await self.get_sol_balance_async(wallet_address)
+                wallet_balance = balance_info.get('balance', {}).get('int', 0)
+            except Exception as e:
+                logger.warning(f"獲取錢包餘額失敗: {str(e)}")
+            
+            # 按錢包地址和代幣地址分組處理交易
+            transaction_rows = []
+            trades_df = pd.DataFrame(trades)
+            
+            for (signer, token_address), group in trades_df.groupby(['signer', 'token_address']):
+                group = group.sort_values('timestamp')
+                holding_amount = 0
+                holding_cost = 0
+                
+                for _, trade_row in group.iterrows():
+                    original_holding_amount = holding_amount
+                    realized_profit = 0
+                    realized_profit_percentage = 0
+                    
+                    if trade_row['side'] == 'sell':
+                        sell_amount = trade_row['amount']
+                        avg_cost = (holding_cost / holding_amount) if holding_amount > 0 else 0
+                        realized_profit = (trade_row['price'] - avg_cost) * sell_amount if avg_cost > 0 else 0
+                        realized_profit_percentage = ((trade_row['price'] / avg_cost - 1) * 100) if avg_cost > 0 else 0
+                        holding_amount -= sell_amount
+                        holding_cost -= avg_cost * sell_amount
+                        if holding_amount < 0:
+                            holding_amount = 0
+                            holding_cost = 0
+                    elif trade_row['side'] == 'buy':
+                        holding_amount += trade_row['amount']
+                        holding_cost += trade_row['amount'] * trade_row['price']
+                    
+                    # 處理時間戳
+                    ts = int(trade_row['timestamp'])
+                    if ts > 1e12:
+                        ts = int(ts / 1000)
+                    
+                    # 獲取代幣資訊
+                    token_info = token_info_dict.get(trade_row['token_address'], {})
+                    price = trade_row['price']
+                    # 使用 supply_float 而不是 supply，因為 supply_float 已經考慮了 decimals
+                    supply_float = token_info.get('supply_float', 0) or 0
+                    
+                    try:
+                        marketcap = price * float(supply_float) if supply_float else 0
+                    except (ValueError, TypeError):
+                        marketcap = 0
+                    
+                    value = price * trade_row['amount']
+                    
+                    # 計算持倉百分比
+                    holding_percentage = None
+                    if trade_row['side'] == 'buy':
+                        if wallet_balance > 0:
+                            holding_percentage = min(100, (value / wallet_balance) * 100)
+                    elif trade_row['side'] == 'sell':
+                        if original_holding_amount > 0:
+                            holding_percentage = min(100, (trade_row['amount'] / original_holding_amount) * 100)
+                    
+                    # 獲取代幣詳細資訊
+                    token_icon = token_info.get('image', '')
+                    token_name = token_info.get('symbol', token_info.get('name', ''))
+                    from_token_info = token_info_dict.get(trade_row['token_in'], {})
+                    dest_token_info = token_info_dict.get(trade_row['token_out'], {})
+                    from_token_symbol = from_token_info.get('symbol', '')
+                    dest_token_symbol = dest_token_info.get('symbol', '')
+                    
+                    # 構建交易記錄
+                    tx_data = {
+                        'wallet_address': trade_row['signer'],
+                        'wallet_balance': wallet_balance,
+                        'token_address': trade_row['token_address'],
+                        'token_icon': token_icon,
+                        'token_name': token_name,
+                        'price': price,
+                        'amount': trade_row['amount'],
+                        'marketcap': marketcap,
+                        'value': value,
+                        'holding_percentage': holding_percentage,
+                        'chain': self.get_chain_name(trade_row['chain_id']),
+                        'realized_profit': realized_profit,
+                        'realized_profit_percentage': realized_profit_percentage,
+                        'transaction_type': trade_row['side'],
+                        'transaction_time': ts,
+                        'time': datetime.now(timezone(timedelta(hours=8))),
+                        'signature': trade_row['tx_hash'],
+                        'from_token_address': trade_row['token_in'],
+                        'from_token_symbol': from_token_symbol,
+                        'from_token_amount': trade_row['amount_in'],
+                        'dest_token_address': trade_row['token_out'],
+                        'dest_token_symbol': dest_token_symbol,
+                        'dest_token_amount': trade_row['amount_out'],
+                    }
+                    transaction_rows.append(tx_data)
+            
+            logger.info(f"轉換了 {len(transaction_rows)} 筆交易記錄")
+            return transaction_rows
+            
+        except Exception as e:
+            logger.error(f"轉換交易記錄失敗: {str(e)}")
+            return []
 
 # 創建單例實例
 transaction_processor = TransactionProcessor()
