@@ -30,7 +30,7 @@ httpcore==1.0.8
 httpx==0.28.1
 idna==3.10
 jsonalias==0.1.1
-kafka-python==2.1.5
+kafka-python==2.0.2
 kombu==5.5.2
 multidict==6.4.3
 packaging==24.2
@@ -61,3 +61,4 @@ vine==5.1.0
 wcwidth==0.2.13
 websockets==15.0
 yarl==1.19.0
+pandas>=1.5.0

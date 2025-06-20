@@ -19,9 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # 複製requirements.txt
 COPY requirements.txt .
 
-# 先安裝 kafka-python，指定一個能與 aiokafka 相容的版本
-RUN pip install --no-cache-dir kafka-python==2.0.2
-# 然後安裝其他依賴
+# 安裝依賴
 RUN pip install --no-cache-dir -r requirements.txt
 
 # 複製應用程式代碼

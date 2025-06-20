@@ -1,3 +1,4 @@
+import os
 import uuid
 import time
 import json
@@ -16,10 +17,18 @@ from app.services.solscan import solscan_client
 from decimal import Decimal
 from datetime import datetime, timezone
 import httpx
+import dotenv
+
+logger = logging.getLogger(__name__)
+# logger.setLevel(logging.WARNING)
+
+dotenv.load_dotenv()
 
 router = APIRouter(prefix="/wallets")
 cache_service = CacheService()
 wallet_analyzer = WalletAnalyzer()
+
+SMARTMONEY_BSC = os.getenv("SMARTMONEY_BSC", "http://127.0.0.1:5000/robots/smartmoney/webhook/update-addresses/BSC")
 
 # 請求與響應模型
 class WalletAnalysisRequest(BaseModel):
@@ -28,8 +37,8 @@ class WalletAnalysisRequest(BaseModel):
     time_range: Optional[int] = 7
     chain: str
     type: str = "add"
-    twitter_name: Optional[List[str]] = None  # 新增 Twitter 名稱列表
-    twitter_username: Optional[List[str]] = None  # 新增 Twitter 用戶名列表
+    twitter_names: Optional[List[str]] = None  # 修改為 twitter_names
+    twitter_usernames: Optional[List[str]] = None  # 修改為 twitter_usernames
 
 class WalletMetrics(BaseModel):
     address: str
@@ -434,14 +443,13 @@ async def analyze_kol_wallets(
     background_tasks: BackgroundTasks
 ):
     """批量錢包分析端點 - 立即返回结果与任务ID，使用Celery进行后台处理"""
-    logger = logging.getLogger(__name__)
     logger.info(f"接收到批量kol錢包分析請求：{len(request.addresses)} 個地址，鏈：{request.chain}，操作類型：{request.type}")
     
     # 验证 chain 参数
     valid_chains = ["SOLANA", "BSC", "BASE", "ETH", "TRON"]
     chain = request.chain.upper()
-    twitter_names = request.twitter_name if request.twitter_name else [None] * len(request.addresses)
-    twitter_usernames = request.twitter_username if request.twitter_username else [None] * len(request.addresses)
+    twitter_names = request.twitter_names if request.twitter_names else [None] * len(request.addresses)
+    twitter_usernames = request.twitter_usernames if request.twitter_usernames else [None] * len(request.addresses)
     
     # 驗證 twitter 資料長度是否匹配
     if len(twitter_names) != len(request.addresses):
@@ -483,25 +491,69 @@ async def analyze_kol_wallets(
     
     # BSC 轉發邏輯
     if chain == "BSC" and request.type == "add":
-        bsc_url = "http://127.0.0.1:5000/robots/smartmoney/webhook/update-addresses/BSC"
+        logger.info(f"開始BSC轉發邏輯，目標URL: {SMARTMONEY_BSC}")
+        logger.info(f"請求參數: chain={chain}, type={request.type}, addresses_count={len(request.addresses)}")
+        
         payload = {
             "chain": chain,
             "type": request.type,
             "addresses": request.addresses,
-            "twitter_name": request.twitter_name if request.twitter_name else [None] * len(request.addresses),
-            "twitter_username": request.twitter_username if request.twitter_username else [None] * len(request.addresses)
+            "twitter_names": request.twitter_names if request.twitter_names else [None] * len(request.addresses),
+            "twitter_usernames": request.twitter_usernames if request.twitter_usernames else [None] * len(request.addresses)
         }
+        
+        logger.info(f"準備發送的payload: {json.dumps(payload, ensure_ascii=False, indent=2)}")
+        
         async with httpx.AsyncClient() as client:
             try:
-                resp = await client.post(bsc_url, json=payload, timeout=30)
+                logger.info(f"開始發送HTTP請求到 {SMARTMONEY_BSC}")
+                logger.info(f"請求方法: POST, 超時時間: 30秒")
+                
+                resp = await client.post(SMARTMONEY_BSC, json=payload, timeout=30)
+                
+                logger.info(f"HTTP請求完成，狀態碼: {resp.status_code}")
+                logger.info(f"響應頭: {dict(resp.headers)}")
+                
+                # 嘗試記錄響應內容
+                try:
+                    response_text = resp.text
+                    logger.info(f"響應內容長度: {len(response_text)} 字符")
+                    if len(response_text) < 1000:  # 只記錄較短的響應內容
+                        logger.info(f"響應內容: {response_text}")
+                    else:
+                        logger.info(f"響應內容前500字符: {response_text[:500]}")
+                except Exception as e:
+                    logger.warning(f"無法讀取響應內容: {str(e)}")
+                
                 resp.raise_for_status()
+                logger.info("BSC webhook請求成功")
+                
                 # 直接返回 webhook 的 json 結果
                 return JSONResponse(status_code=resp.status_code, content=resp.json())
+                
             except httpx.HTTPStatusError as e:
-                logger.error(f"BSC webhook error: {e.response.text}")
+                logger.error(f"BSC webhook HTTP錯誤: 狀態碼={e.response.status_code}")
+                logger.error(f"錯誤響應內容: {e.response.text}")
+                logger.error(f"請求URL: {SMARTMONEY_BSC}")
+                logger.error(f"請求payload: {json.dumps(payload, ensure_ascii=False)}")
                 raise HTTPException(status_code=e.response.status_code, detail=f"BSC webhook error: {e.response.text}")
+                
+            except httpx.TimeoutException as e:
+                logger.error(f"BSC webhook請求超時: {str(e)}")
+                logger.error(f"請求URL: {SMARTMONEY_BSC}")
+                logger.error(f"超時設置: 30秒")
+                raise HTTPException(status_code=408, detail=f"BSC webhook timeout: {str(e)}")
+                
+            except httpx.ConnectError as e:
+                logger.error(f"BSC webhook連接錯誤: {str(e)}")
+                logger.error(f"請求URL: {SMARTMONEY_BSC}")
+                raise HTTPException(status_code=503, detail=f"BSC webhook connection error: {str(e)}")
+                
             except Exception as e:
-                logger.error(f"BSC webhook exception: {str(e)}")
+                logger.error(f"BSC webhook未知異常: {str(e)}")
+                logger.error(f"異常類型: {type(e).__name__}")
+                logger.error(f"請求URL: {SMARTMONEY_BSC}")
+                logger.error(f"請求payload: {json.dumps(payload, ensure_ascii=False)}")
                 raise HTTPException(status_code=500, detail=f"BSC webhook exception: {str(e)}")
 
     # 檢查重複地址並移除
@@ -655,15 +707,18 @@ async def analyze_kol_wallets(
                     logger.info(f"提交第 {batch_idx+1}/{len(address_groups)} 批 ({len(address_batch)} 个地址)")
                     
                     # 提交批处理任务到Celery
-                    process_wallet_batch.delay(
-                        request_id=request_id,
-                        addresses=address_batch,
-                        time_range=request.time_range,
-                        include_metrics=request.include_metrics,
-                        batch_index=batch_idx,
-                        chain=chain,  # 添加链信息
-                        twitter_names=[twitter_names[request.addresses.index(addr)] for addr in address_batch],  # 根據地址索引獲取對應的 Twitter 名稱
-                        twitter_usernames=[twitter_usernames[request.addresses.index(addr)] for addr in address_batch]  # 根據地址索引獲取對應的 Twitter 用戶名
+                    process_wallet_batch.apply_async(
+                        kwargs={
+                            "request_id": request_id,
+                            "addresses": address_batch,
+                            "time_range": request.time_range,
+                            "include_metrics": request.include_metrics,
+                            "batch_index": batch_idx,
+                            "chain": chain,  # 添加链信息
+                            "twitter_names": [twitter_names[request.addresses.index(addr)] for addr in address_batch],
+                            "twitter_usernames": [twitter_usernames[request.addresses.index(addr)] for addr in address_batch]
+                        },
+                        queue="batch_processing"  # 明确指定队列
                     )
                     
                     # 简短等待，避免一次提交过多任务

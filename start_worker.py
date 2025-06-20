@@ -14,14 +14,31 @@ load_dotenv()
 
 os.makedirs("app/logs", exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("app/logs/worker.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
+# 為 Worker 創建專門的 logger
+worker_logger = logging.getLogger("worker")
+worker_logger.setLevel(logging.INFO)
+
+# 清除現有的 handlers
+for handler in worker_logger.handlers[:]:
+    worker_logger.removeHandler(handler)
+
+# 添加文件 handler
+file_handler = logging.FileHandler("app/logs/worker.log", encoding="utf-8")
+file_handler.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+worker_logger.addHandler(file_handler)
+
+# 添加控制台 handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+worker_logger.addHandler(console_handler)
+
+# 防止日誌向上傳播
+worker_logger.propagate = False
+
+logger = worker_logger
 
 # 確保環境變量已設置，如果沒有則使用默認值
 if not os.getenv('CELERY_BROKER_URL'):
@@ -30,8 +47,13 @@ if not os.getenv('CELERY_BROKER_URL'):
 if not os.getenv('CELERY_RESULT_BACKEND'):
     os.environ["CELERY_RESULT_BACKEND"] = "redis://localhost:6379/1"
 
+# 設置 Celery 日誌環境變量
+os.environ["CELERYD_LOG_FILE"] = "app/logs/worker.log"
+os.environ["CELERYD_LOG_LEVEL"] = "INFO"
+
 print("啟動 Celery worker...")
 print(f"環境變量設置為: CELERY_BROKER_URL={os.getenv('CELERY_BROKER_URL')}")
+print(f"日誌文件設置為: {os.getenv('CELERYD_LOG_FILE')}")
 
 # 使用 Python 的 -m 選項啟動 Celery
 cmd = [
@@ -39,7 +61,8 @@ cmd = [
     "-m", "celery",
     "-A", "app.workers.tasks",
     "worker",
-    "--loglevel=info"
+    "--loglevel=info",
+    "--logfile=app/logs/worker.log"  # 指定日誌文件
 ]
 
 # 針對 Windows 環境的特殊處理
@@ -48,8 +71,8 @@ if platform.system() == "Windows":
 else:
     cmd.append("--pool=solo")      # 其他系統使用 solo 池
 
-# 添加隊列設置
-cmd.extend(["-Q", "celery,wallet_tasks"])
+# 添加隊列設置，使用與 celeryconfig.py 相同的隊列名稱
+cmd.extend(["-Q", "wallet_analysis,batch_processing"])
 
 # 啟動 worker
 print(f"命令: {' '.join(cmd)}")

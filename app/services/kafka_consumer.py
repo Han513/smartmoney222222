@@ -12,7 +12,13 @@ import uuid
 from app.core.config import settings
 from app.services.cache_service import cache_service
 
+# 設置 Kafka 相關日誌級別，減少不必要的警告
+logging.getLogger("aiokafka.consumer.group_coordinator").setLevel(logging.ERROR)
+logging.getLogger("aiokafka.consumer").setLevel(logging.ERROR)
+logging.getLogger("aiokafka").setLevel(logging.ERROR)
+
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 class KafkaConsumerService:
     """
@@ -48,7 +54,26 @@ class KafkaConsumerService:
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 enable_auto_commit=False,
                 retry_backoff_ms=500,
-                request_timeout_ms=30000
+                request_timeout_ms=30000,
+                # 添加以下配置來減少rebalancing警告
+                session_timeout_ms=30000,  # 會話超時時間
+                heartbeat_interval_ms=3000,  # 心跳間隔
+                max_poll_interval_ms=300000,  # 最大輪詢間隔
+                max_poll_records=500,  # 每次輪詢最大記錄數
+                fetch_max_wait_ms=500,  # 獲取最大等待時間
+                fetch_min_bytes=1,  # 最小獲取字節數
+                fetch_max_bytes=52428800,  # 最大獲取字節數 (50MB)
+                # 連接和重試配置
+                reconnect_backoff_ms=50,
+                reconnect_backoff_max_ms=1000,
+                retry_backoff_ms=100,
+                # 消費者組配置
+                group_session_timeout_ms=30000,
+                group_heartbeat_interval_ms=3000,
+                group_rebalance_timeout_ms=60000,
+                # 其他配置
+                check_crcs=True,
+                isolation_level="read_committed"
             )
             
             await self.consumer.start()
@@ -170,7 +195,26 @@ class KafkaConsumerService:
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 enable_auto_commit=False,
                 retry_backoff_ms=500,
-                request_timeout_ms=30000
+                request_timeout_ms=30000,
+                # 添加以下配置來減少rebalancing警告
+                session_timeout_ms=30000,  # 會話超時時間
+                heartbeat_interval_ms=3000,  # 心跳間隔
+                max_poll_interval_ms=300000,  # 最大輪詢間隔
+                max_poll_records=500,  # 每次輪詢最大記錄數
+                fetch_max_wait_ms=500,  # 獲取最大等待時間
+                fetch_min_bytes=1,  # 最小獲取字節數
+                fetch_max_bytes=52428800,  # 最大獲取字節數 (50MB)
+                # 連接和重試配置
+                reconnect_backoff_ms=50,
+                reconnect_backoff_max_ms=1000,
+                retry_backoff_ms=100,
+                # 消費者組配置
+                group_session_timeout_ms=30000,
+                group_heartbeat_interval_ms=3000,
+                group_rebalance_timeout_ms=60000,
+                # 其他配置
+                check_crcs=True,
+                isolation_level="read_committed"
             )
             
             await self.consumer.start()
@@ -226,7 +270,7 @@ class KafkaConsumerService:
                 expiry=7 * 24 * 3600
             )
             
-            logger.info(f"消息 {message_id} 已保存到緩存")
+            # logger.info(f"消息 {message_id} 已保存到緩存")
             return True
         except Exception as e:
             logger.error(f"保存消息到緩存失敗: {e}")

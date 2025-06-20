@@ -23,7 +23,7 @@ UTC_PLUS_8 = timezone(timedelta(hours=8))
 class TokenInfo(Base):
     """代幣元數據表"""
     __tablename__ = 'token_metadata'
-    __table_args__ = {'schema': 'solana'}
+    __table_args__ = {'schema': 'dex_query_v1'}
     
     address = Column(String(255), primary_key=True)
     name = Column(String(255), nullable=True)
@@ -234,10 +234,10 @@ class TokenRepository:
                             decimals,
                             logo,
                             supply,
-                            price,
-                            market_cap,
-                            holder_count,
-                            created_time
+                            price_usd,
+                            timestamp,
+                            fdv_usd,
+                            created_at
                         FROM dex_query_v1.tokens 
                         WHERE address = :address
                         LIMIT 1
@@ -253,10 +253,10 @@ class TokenRepository:
                             "decimals": result.decimals or 9,
                             "icon": result.logo,
                             "supply": result.supply,
-                            "price": result.price,
-                            "market_cap": result.market_cap,
-                            "holder_count": result.holder_count,
-                            "created_time": result.created_time,
+                            "price": result.price_usd,
+                            "timestamp": result.timestamp,
+                            "fdv_usd": result.fdv_usd,
+                            "created_time": result.created_at,
                             "is_stable": False,
                             "is_native": False
                         }
@@ -265,7 +265,7 @@ class TokenRepository:
                         self.in_memory_cache[address] = token_info
                         self.cache_expiry[address] = datetime.now(UTC_PLUS_8) + timedelta(seconds=self.cache_ttl)
                         
-                        logger.info(f"從 Ian 資料庫獲取到代幣信息: {address} - {token_info.get('symbol', 'Unknown')}")
+                        # logger.info(f"從 Ian 資料庫獲取到代幣信息: {address} - {token_info.get('symbol', 'Unknown')}")
                         return token_info
                         
             except Exception as e:
@@ -322,8 +322,8 @@ class TokenRepository:
                         "supply_float": supply_float,
                         "price": data.get("price", 0),
                         "market_cap": data.get("market_cap", 0),
-                        "holder_count": data.get("holder", 0),
-                        "created_time": data.get("created_time"),
+                        # "fdv_usd": data.get("fdv_usd", 0),
+                        "created_time": data.get("created_at"),
                         "updated_at": datetime.now(UTC_PLUS_8)
                     }
                     
@@ -509,10 +509,10 @@ class TokenRepository:
                                 decimals,
                                 logo,
                                 supply,
-                                price,
-                                market_cap,
-                                holder_count,
-                                created_time
+                                price_usd,
+                                timestamp,
+                                fdv_usd,
+                                created_at
                             FROM dex_query_v1.tokens 
                             WHERE address = :address
                             LIMIT 1
@@ -528,10 +528,10 @@ class TokenRepository:
                                 "decimals": result.decimals or 9,
                                 "icon": result.logo,
                                 "supply": result.supply,
-                                "price": result.price,
-                                "market_cap": result.market_cap,
-                                "holder_count": result.holder_count,
-                                "created_time": result.created_time,
+                                "price": result.price_usd,
+                                "timestamp": result.timestamp,
+                                "fdv_usd": result.fdv_usd,
+                                "created_time": result.created_at,
                                 "is_stable": False,
                                 "is_native": False
                             }
@@ -540,7 +540,7 @@ class TokenRepository:
                             self.in_memory_cache[token_address] = token_info
                             self.cache_expiry[token_address] = datetime.now(UTC_PLUS_8) + timedelta(seconds=self.cache_ttl)
                             
-                            logger.info(f"從 Ian 資料庫獲取到代幣信息: {token_address} - {token_info.get('symbol', 'Unknown')}")
+                            # logger.info(f"從 Ian 資料庫獲取到代幣信息: {token_address} - {token_info.get('symbol', 'Unknown')}")
                             return token_info
                             
                 except Exception as e:
@@ -629,8 +629,8 @@ class TokenRepository:
                                 "supply_float": supply_float,
                                 "price": data.get("price", 0),
                                 "market_cap": data.get("market_cap", 0),
-                                "holder_count": data.get("holder", 0),
-                                "created_time": data.get("created_time"),
+                                # "fdv_usd": data.get("fdv_usd", 0),
+                                "created_time": data.get("created_at"),
                                 "updated_at": datetime.now(UTC_PLUS_8)
                             }
                             

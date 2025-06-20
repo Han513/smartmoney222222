@@ -4,6 +4,9 @@ from pydantic import Field
 from typing import List, Optional
 from functools import lru_cache
 import logging
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class Settings(BaseSettings):
     """
@@ -14,6 +17,9 @@ class Settings(BaseSettings):
     API_TITLE: str = "Wallet Analysis API"
     API_VERSION: str = "1.0.0"
     API_DESCRIPTION: str = "批量分析錢包交易歷史和指標"
+    
+    # 日誌配置
+    LOG_LEVEL: str = Field(default="WARNING", description="日誌級別: DEBUG, INFO, WARNING, ERROR, CRITICAL")
     
     # Redis 配置
     REDIS_HOST: str = "localhost"
@@ -97,3 +103,27 @@ def get_settings() -> Settings:
 
 # 導出單例
 settings = get_settings()
+
+def setup_logging():
+    """
+    設置日誌配置
+    """
+    # 獲取日誌級別
+    log_level = getattr(settings, 'LOG_LEVEL', 'WARNING').upper()
+    
+    # 設置根 logger 級別
+    logging.basicConfig(
+        level=getattr(logging, log_level, logging.WARNING),
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    
+    # 設置特定模組的 logger 級別
+    logging.getLogger('app.api.router').setLevel(getattr(logging, log_level, logging.WARNING))
+    logging.getLogger('app.services').setLevel(getattr(logging, log_level, logging.WARNING))
+    logging.getLogger('app.workers').setLevel(getattr(logging, log_level, logging.WARNING))
+    
+    # 設置第三方庫的日誌級別為 WARNING 或更高
+    logging.getLogger('httpx').setLevel(logging.WARNING)
+    logging.getLogger('urllib3').setLevel(logging.WARNING)
+    logging.getLogger('asyncio').setLevel(logging.WARNING)

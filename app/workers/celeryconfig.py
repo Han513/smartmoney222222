@@ -13,6 +13,12 @@ accept_content = ['json']
 timezone = 'UTC'
 enable_utc = True
 
+# 日誌配置
+worker_log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+worker_task_log_format = '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+worker_log_file = 'app/logs/worker.log'
+worker_log_level = 'INFO'
+
 # 隊列配置
 task_routes = {
     "app.workers.tasks.analyze_wallet": {"queue": "wallet_analysis"},

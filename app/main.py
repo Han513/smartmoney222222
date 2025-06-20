@@ -6,25 +6,43 @@ from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from app.services.wallet_analyzer import wallet_analyzer
 from app.api.router import router
-from app.core.config import settings
+from app.core.config import settings, setup_logging
 from app.services.transaction_processor import transaction_processor
 from app.services.kafka_consumer import kafka_consumer
 from app.services.kafka_processor import message_processor
 from app.services.wallet_sync_service import wallet_sync_service
 from app.services.wallet_cache_service import wallet_cache_service
 
+# 設置日誌配置
+setup_logging()
+
 os.makedirs("app/logs", exist_ok=True)
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("app/logs/worker.log", encoding="utf-8"),
-        logging.StreamHandler()
-    ]
-)
+# 為 API 服務創建專門的 logger
+api_logger = logging.getLogger("api")
+api_logger.setLevel(logging.INFO)
 
-logger = logging.getLogger(__name__)
+# 清除現有的 handlers
+for handler in api_logger.handlers[:]:
+    api_logger.removeHandler(handler)
+
+# 添加文件 handler
+file_handler = logging.FileHandler("app/logs/api.log", encoding="utf-8")
+file_handler.setLevel(logging.INFO)
+formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+file_handler.setFormatter(formatter)
+api_logger.addHandler(file_handler)
+
+# 添加控制台 handler
+console_handler = logging.StreamHandler()
+console_handler.setLevel(logging.INFO)
+console_handler.setFormatter(formatter)
+api_logger.addHandler(console_handler)
+
+# 防止日誌向上傳播
+api_logger.propagate = False
+
+logger = api_logger
 
 
 # 定義應用生命週期管理器

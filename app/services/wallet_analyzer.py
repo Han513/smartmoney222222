@@ -436,7 +436,8 @@ class WalletAnalyzer:
                                 WalletSummary.chain == chain
                             ).values(
                                 twitter_name=twitter_name,
-                                twitter_username=twitter_username
+                                twitter_username=twitter_username,
+                                is_active=True
                             )
                             session.execute(stmt)
                             session.commit()

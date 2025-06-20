@@ -383,8 +383,12 @@ from app.services.cache_service import cache_service
 from app.services.transaction_processor import transaction_processor
 from app.services.wallet_summary_service import wallet_summary_service
 from app.services.wallet_cache_service import wallet_cache_service
+from app.models.models import TokenBuyData
+from sqlalchemy import select
+from app.database.session import async_session
 
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.WARNING)
 
 class MessageProcessor:
     """
@@ -542,7 +546,7 @@ class MessageProcessor:
         """處理單個消息"""
         try:
             start_time = time.time()
-            logger.info(f"開始處理消息: {message_id}")
+            # logger.info(f"開始處理消息: {message_id}")
 
             # 獲取事件數據
             event_data = message["data"]
@@ -566,27 +570,47 @@ class MessageProcessor:
             # 檢查錢包地址是否存在
             wallet_exists = await wallet_cache_service.is_wallet_exists(wallet_address)
             if not wallet_exists:
-                logger.info(f"跳過處理不存在的錢包地址: {wallet_address}")
+                # logger.info(f"跳過處理不存在的錢包地址: {wallet_address}")
                 return True
 
-            logger.info(f"處理交易: {wallet_address} {side} {amount} of {token_address} at {price}")
+            # 使用 WalletTokenState 緩存機制判斷交易類型
+            transaction_type = transaction_processor.determine_transaction_type(
+                wallet_address, token_address, is_buy, amount
+            )
+
+            logger.info(f"處理交易: {wallet_address} {transaction_type} {amount} of {token_address} at {price}")
+
+            # 根據 side 動態判斷 from/dest token（新版邏輯）
+            base_mint = event.get("baseMint", "")
+            quote_mint = event.get("quoteMint", "")
+
+            if side == "buy":
+                dest_token_address = token_address
+                from_token_address = base_mint if quote_mint == token_address else quote_mint
+                dest_token_amount = float(event.get("toTokenAmount", 0))
+                from_token_amount = float(event.get("fromTokenAmount", 0))
+            else:  # sell
+                from_token_address = token_address
+                dest_token_address = base_mint if quote_mint == token_address else quote_mint
+                from_token_amount = float(event.get("fromTokenAmount", 0))
+                dest_token_amount = float(event.get("toTokenAmount", 0))
 
             # 構建基本交易數據
             transaction_data = {
                 "wallet_address": wallet_address,
                 "signature": txn_hash,
                 "transaction_time": timestamp,
-                "transaction_type": "buy" if is_buy else "sell",
+                "transaction_type": transaction_type,
                 "token_address": token_address,
                 "amount": amount,
                 "price": price,
                 "chain": "SOLANA",
                 "source": event.get("source", ""),
                 "pool_address": event.get("poolAddress", ""),
-                "from_token_address": event.get("baseMint", ""),
-                "from_token_amount": float(event.get("fromTokenAmount", 0)),
-                "dest_token_address": event.get("quoteMint", ""),
-                "dest_token_amount": float(event.get("toTokenAmount", 0)),
+                "from_token_address": from_token_address,
+                "from_token_amount": from_token_amount,
+                "dest_token_address": dest_token_address,
+                "dest_token_amount": dest_token_amount,
                 "value": price * amount
             }
 
@@ -596,9 +620,15 @@ class MessageProcessor:
             if save_result:
                 logger.info(f"成功保存交易: {txn_hash}")
 
+                # 更新 WalletTokenState 緩存
+                transaction_processor._update_wallet_token_state_after_transaction(
+                    wallet_address, token_address, transaction_type,
+                    amount, price * amount, price, timestamp
+                )
+
                 await wallet_summary_service.increment_transaction_counts(
                     wallet_address,
-                    "buy" if is_buy else "sell",
+                    transaction_type,  # 使用新的交易類型
                     timestamp
                 )
 

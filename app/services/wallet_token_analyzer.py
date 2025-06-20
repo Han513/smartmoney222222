@@ -4,9 +4,9 @@ import time
 from typing import Dict, Any, Tuple
 from decimal import Decimal
 from datetime import datetime, timezone, timedelta
-from sqlalchemy import select, update, func, and_, select
+from sqlalchemy import select, update, func, and_, select, text
 from app.core.db import get_session_factory
-from app.models.models import TokenBuyData
+from app.models.models import TokenBuyData, TempTokenBuyData
 from app.services.solscan import solscan_client
 from app.services.cache_service import cache_service
 
@@ -124,15 +124,15 @@ class WalletTokenAnalyzer:
                 cache_data = {
                     "wallet_address": data.wallet_address,
                     "token_address": data.token_address,
-                    "holding_amount": format_number_string(data.total_amount),
-                    "total_buy_value": format_number_string(data.total_cost),
-                    "total_buy_amount": format_number_string(data.historical_total_buy_amount),
-                    "total_buy_count": format_number_as_integer_string(data.total_buy_count),
-                    "total_sell_value": format_number_string(data.historical_total_sell_value),
-                    "total_sell_amount": format_number_string(data.historical_total_sell_amount),
-                    "total_sell_count": format_number_as_integer_string(data.total_sell_count),
-                    "realized_pnl": format_number_string(data.realized_profit),
-                    "total_holding_seconds": data.total_holding_seconds
+                    "holding_amount": format_number_string(float(data.total_amount or 0)),
+                    "total_buy_value": format_number_string(float(data.total_cost or 0)),
+                    "total_buy_amount": format_number_string(float(data.historical_total_buy_amount or 0)),
+                    "total_buy_count": format_number_as_integer_string(int(data.total_buy_count or 0)),
+                    "total_sell_value": format_number_string(float(data.historical_total_sell_value or 0)),
+                    "total_sell_amount": format_number_string(float(data.historical_total_sell_amount or 0)),
+                    "total_sell_count": format_number_as_integer_string(int(data.total_sell_count or 0)),
+                    "realized_pnl": format_number_string(float(data.realized_profit or 0)),
+                    "total_holding_seconds": int(data.total_holding_seconds or 0)
                 }
                 await cache_service.set(cache_key, cache_data, expiry=self.cache_ttl)
     
@@ -229,18 +229,20 @@ class WalletTokenAnalyzer:
                     func.sum(subquery.c.total_holding_seconds).label('total_holding_seconds')
                 )
                 result = session.execute(stmt).first()
+                
+                # 確保所有數值都正確轉換，避免Decimal序列化問題
                 analysis_data = {
                     "wallet_address": wallet_address,
                     "token_address": token_address,
-                    "holding_amount": format_number_string(result.total_amount or 0),
-                    "total_buy_value": format_number_string(result.historical_total_buy_cost or 0),
-                    "total_buy_amount": format_number_string(result.historical_total_buy_amount or 0),
-                    "total_buy_count": format_number_as_integer_string(result.total_buy_count or 0),
-                    "total_sell_value": format_number_string(result.historical_total_sell_value or 0),
-                    "total_sell_amount": format_number_string(result.historical_total_sell_amount or 0),
-                    "total_sell_count": format_number_as_integer_string(result.total_sell_count or 0),
-                    "realized_pnl": format_number_string(result.realized_profit or 0),
-                    "total_holding_seconds": result.total_holding_seconds or 0
+                    "holding_amount": format_number_string(max(0, float(result.total_amount or 0))),
+                    "total_buy_value": format_number_string(float(result.historical_total_buy_cost or 0)),
+                    "total_buy_amount": format_number_string(float(result.historical_total_buy_amount or 0)),
+                    "total_buy_count": format_number_as_integer_string(int(result.total_buy_count or 0)),
+                    "total_sell_value": format_number_string(float(result.historical_total_sell_value or 0)),
+                    "total_sell_amount": format_number_string(float(result.historical_total_sell_amount or 0)),
+                    "total_sell_count": format_number_as_integer_string(int(result.total_sell_count or 0)),
+                    "realized_pnl": format_number_string(float(result.realized_profit or 0)),
+                    "total_holding_seconds": int(result.total_holding_seconds or 0)
                 }
 
             # 更新緩存（key包含chain）
@@ -305,13 +307,14 @@ class WalletTokenAnalyzer:
         thirty_days_ago = datetime.now() - timedelta(days=30)
         
         with self.session_factory() as session:
+            session.execute(text("SET search_path TO dex_query_v1;"))
             # 優化查詢：使用子查詢先過濾數據，再進行聚合
-            subquery = select(TokenBuyData).where(
+            subquery = select(TempTokenBuyData).where(
                 and_(
-                    TokenBuyData.wallet_address == wallet_address,
-                    TokenBuyData.token_address == token_address,
-                    TokenBuyData.chain == chain,
-                    TokenBuyData.date >= thirty_days_ago
+                    TempTokenBuyData.wallet_address == wallet_address,
+                    TempTokenBuyData.token_address == token_address,
+                    TempTokenBuyData.chain == chain,
+                    TempTokenBuyData.date >= thirty_days_ago
                 )
             ).subquery()
             
@@ -332,19 +335,19 @@ class WalletTokenAnalyzer:
             result = session.execute(stmt).first()
             
             if result:
-                # 將查詢結果轉換為字典
+                # 將查詢結果轉換為字典，確保所有數值都正確轉換
                 data = {
                     "wallet_address": wallet_address,
                     "token_address": token_address,
-                    "holding_amount": format_number_string(result.total_amount or 0),
-                    "total_buy_value": format_number_string(result.historical_total_buy_cost or 0),
-                    "total_buy_amount": format_number_string(result.historical_total_buy_amount or 0),
-                    "total_buy_count": format_number_as_integer_string(result.total_buy_count or 0),
-                    "total_sell_value": format_number_string(result.historical_total_sell_value or 0),
-                    "total_sell_amount": format_number_string(result.historical_total_sell_amount or 0),
-                    "total_sell_count": format_number_as_integer_string(result.total_sell_count or 0),
-                    "realized_pnl": format_number_string(result.realized_profit or 0),
-                    "total_holding_seconds": result.total_holding_seconds or 0
+                    "holding_amount": format_number_string(max(0, float(result.total_amount or 0))),
+                    "total_buy_value": format_number_string(float(result.historical_total_buy_cost or 0)),
+                    "total_buy_amount": format_number_string(float(result.historical_total_buy_amount or 0)),
+                    "total_buy_count": format_number_as_integer_string(int(result.total_buy_count or 0)),
+                    "total_sell_value": format_number_string(float(result.historical_total_sell_value or 0)),
+                    "total_sell_amount": format_number_string(float(result.historical_total_sell_amount or 0)),
+                    "total_sell_count": format_number_as_integer_string(int(result.total_sell_count or 0)),
+                    "realized_pnl": format_number_string(float(result.realized_profit or 0)),
+                    "total_holding_seconds": int(result.total_holding_seconds or 0)
                 }
                 
                 # 寫入緩存

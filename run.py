@@ -34,7 +34,10 @@ if platform.system() != "Windows":
     except ImportError:
         logger.info("uvloop not available, using default event loop")
 else:
-    logger.info("Running on Windows, skipping uvloop")
+    # 針對 Windows 的 asyncio 策略
+    import asyncio
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+    logger.info("Running on Windows, setting asyncio event loop policy to WindowsSelectorEventLoopPolicy")
 
 def force_exit(signum=None, frame=None):
     logger.warning("強制終止程序")

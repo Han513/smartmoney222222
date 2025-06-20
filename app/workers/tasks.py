@@ -4,11 +4,15 @@ import asyncio
 import logging
 import time
 import math
+import os
 from app.core.config import settings
 from app.services.wallet_analyzer import wallet_analyzer
 from app.services.cache_service import cache_service
 from celery.signals import worker_process_init, worker_process_shutdown
 from sqlalchemy import update, func
+
+# 確保日誌目錄存在
+os.makedirs("app/logs", exist_ok=True)
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +31,35 @@ celery_app.conf.update(
     task_track_started=True,
     task_time_limit=600,  # 设置任务超时时间（10分钟）
     worker_max_tasks_per_child=100,  # 每个worker处理完100个任务后重启
-    worker_concurrency=4  # 允许多个并发worker
+    worker_concurrency=4,  # 允许多个并发worker
+    # 日誌配置
+    worker_log_format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    worker_task_log_format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    worker_log_file='app/logs/worker.log',
+    worker_log_level='INFO'
 )
 
 @worker_process_init.connect
 def init_worker(**kwargs):
-    """Worker初始化时创建事件循环"""
-    logger.info("Worker已初始化")
+    """Worker初始化时创建事件循环和設置日誌"""
+    # 簡單的日誌配置
+    import logging
+    import os
+    
+    # 確保日誌目錄存在
+    os.makedirs("app/logs", exist_ok=True)
+    
+    # 配置根 logger
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+        handlers=[
+            logging.FileHandler('app/logs/worker.log', encoding='utf-8'),
+            logging.StreamHandler()
+        ]
+    )
+    
+    logger.info("Worker已初始化，日誌配置已設置")
 
 @worker_process_shutdown.connect
 def shutdown_worker(**kwargs):
@@ -44,40 +70,19 @@ def shutdown_worker(**kwargs):
 def run_async_task(coro):
     """运行异步任务的包装函数"""
     try:
-        # 嘗試獲取當前事件循環
-        loop = asyncio.get_event_loop()
-        if loop.is_running():
-            # 如果事件循環正在運行，使用 asyncio.run_coroutine_threadsafe
-            import concurrent.futures
-            import threading
-            
-            # 創建一個新的線程來運行協程
-            def run_in_thread():
-                new_loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(new_loop)
-                try:
-                    return new_loop.run_until_complete(coro)
-                finally:
-                    new_loop.close()
-            
-            with concurrent.futures.ThreadPoolExecutor() as executor:
-                future = executor.submit(run_in_thread)
-                return future.result()
-        else:
-            # 如果事件循環沒有運行，直接運行
-            return loop.run_until_complete(coro)
-    except RuntimeError:
-        # 如果沒有事件循環，創建一個新的
+        # 創建新的事件循環
         loop = asyncio.new_event_loop()
         asyncio.set_event_loop(loop)
         try:
             return loop.run_until_complete(coro)
         finally:
-            # 不要關閉循環，讓它保持活躍以供後續使用
-            pass
+            loop.close()
+    except Exception as e:
+        logger.exception(f"運行異步任務時發生錯誤: {str(e)}")
+        raise
 
 # 处理单个钱包的任务
-@celery_app.task(name="process_single_wallet")
+@celery_app.task(name="app.workers.tasks.process_single_wallet")
 def process_single_wallet(
     address, 
     time_range=7, 
@@ -117,7 +122,8 @@ def process_single_wallet(
                     WalletSummary.chain == chain
                 ).values(
                     twitter_name=twitter_name,
-                    twitter_username=twitter_username
+                    twitter_username=twitter_username,
+                    is_active=True
                 )
                 session.execute(stmt)
                 session.commit()
@@ -154,7 +160,7 @@ def process_single_wallet(
         run_async_task(cache_service.delete(f"processing:{chain}:{address}"))
 
 # 批量处理钱包的任务
-@celery_app.task(name="process_wallet_batch", bind=True)
+@celery_app.task(name="app.workers.tasks.process_wallet_batch", bind=True)
 def process_wallet_batch(
     self, 
     request_id, 
@@ -163,8 +169,8 @@ def process_wallet_batch(
     include_metrics=None, 
     batch_index=0, 
     chain="SOLANA",
-    twitter_names=None,  # 改為複數形式
-    twitter_usernames=None  # 改為複數形式
+    twitter_names=None,
+    twitter_usernames=None
 ):
     """處理一批錢包地址的Celery任務"""
     start_time = time.time()
@@ -186,22 +192,22 @@ def process_wallet_batch(
         twitter_usernames = twitter_usernames[:len(addresses)] if len(twitter_usernames) > len(addresses) else twitter_usernames + [None] * (len(addresses) - len(twitter_usernames))
     
     results = []
-    # 为每个地址创建单独的任务
+    # 直接處理每個地址，而不是創建新的任務
     for i, address in enumerate(addresses):
-        # 使用apply_async而不是delay，以便指定队列和其他参数
-        task = process_single_wallet.apply_async(
-            args=[address], 
-            kwargs={
-                "time_range": time_range,
-                "include_metrics": include_metrics,
-                "request_id": request_id,
-                "chain": chain,
-                "twitter_name": twitter_names[i],  # 使用對應索引的 Twitter 名稱
-                "twitter_username": twitter_usernames[i]  # 使用對應索引的 Twitter 用戶名
-            },
-            queue="wallet_tasks"
-        )
-        results.append({"address": address, "task_id": task.id})
+        try:
+            result = process_single_wallet(
+                address=address,
+                time_range=time_range,
+                include_metrics=include_metrics,
+                request_id=request_id,
+                chain=chain,
+                twitter_name=twitter_names[i],
+                twitter_username=twitter_usernames[i]
+            )
+            results.append({"address": address, "status": "success", "result": result})
+        except Exception as e:
+            logger.exception(f"處理錢包 {address} 時出錯: {str(e)}")
+            results.append({"address": address, "status": "error", "error": str(e)})
     
     end_time = time.time()
     total_time = end_time - start_time
@@ -212,9 +218,9 @@ def process_wallet_batch(
     logger.info(f"平均每個錢包耗時: {total_time/max(1, total_wallets):.2f} 秒")
     logger.info(f"==============================")
 
-    return {"batch_index": batch_index, "tasks": results}
+    return {"batch_index": batch_index, "results": results}
 
-@celery_app.task(name="remove_wallet_data_batch", bind=True)
+@celery_app.task(name="app.workers.tasks.remove_wallet_data_batch", bind=True)
 def remove_wallet_data_batch(self, request_id, addresses, batch_index=0, chain="SOLANA"):
     """处理一批钱包地址的删除任务"""
     from sqlalchemy import delete

@@ -284,11 +284,11 @@ class WalletSummaryService:
         wallet_summary.total_transaction_num_30d = (wallet_summary.total_transaction_num_30d or 0) + 1
         
         # 更新買入/賣出次數
-        if transaction_type == "buy":
+        if transaction_type in ["build", "buy"]:
             wallet_summary.buy_num_1d = (wallet_summary.buy_num_1d or 0) + 1
             wallet_summary.buy_num_7d = (wallet_summary.buy_num_7d or 0) + 1
             wallet_summary.buy_num_30d = (wallet_summary.buy_num_30d or 0) + 1
-        elif transaction_type == "sell":
+        elif transaction_type in ["sell", "clean"]:
             wallet_summary.sell_num_1d = (wallet_summary.sell_num_1d or 0) + 1
             wallet_summary.sell_num_7d = (wallet_summary.sell_num_7d or 0) + 1
             wallet_summary.sell_num_30d = (wallet_summary.sell_num_30d or 0) + 1

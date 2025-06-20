@@ -1,5 +1,5 @@
 # app/services/wallet_sync_service.py
-
+import json
 import asyncio
 import logging
 import time
@@ -182,12 +182,12 @@ class WalletSyncService:
                     
             wallets_to_sync = list(self.updated_wallets)
             self.updated_wallets.clear()
-            logger.info(f"從待同步集合中取出 {len(wallets_to_sync)} 個錢包地址")
+            # logger.info(f"從待同步集合中取出 {len(wallets_to_sync)} 個錢包地址")
         
         if not wallets_to_sync:
             return
                 
-        logger.info(f"開始同步 {len(wallets_to_sync)} 個錢包信息")
+        # logger.info(f"開始同步 {len(wallets_to_sync)} 個錢包信息")
         self.last_sync_time = time.time()
         
         try:
@@ -215,270 +215,242 @@ class WalletSyncService:
                 self.updated_wallets.update(wallets_to_sync)
                 logger.info(f"發生錯誤，已將 {len(wallets_to_sync)} 個錢包地址重新加入待同步集合")
     
+    def _round_float(value, digits=10):
+        return round(value, digits) if isinstance(value, float) else value
+
     async def _get_wallet_data(self, wallet_addresses: List[str]) -> List[Dict[str, Any]]:
         """獲取錢包信息並轉換為 API 所需格式"""
+
+        def safe_number(value, default=0):
+            return value if isinstance(value, (int, float)) else default
+
+        def safe_int(value, default=0):
+            return int(value) if isinstance(value, (int, float)) else default
+
+        def safe_str(value):
+            return str(value) if value is not None else ""
+
         result = []
         try:
             with self.session_factory() as session:
                 wallet_summaries = session.execute(
                     select(WalletSummary).where(WalletSummary.wallet_address.in_(wallet_addresses))
                 ).scalars().all()
-                
+
                 logger.info(f"從數據庫查詢到 {len(wallet_summaries)} 個錢包信息")
-                
+
                 for wallet in wallet_summaries:
                     try:
                         has_transactions = (
-                            (wallet.total_transaction_num_30d or 0) > 0 or
-                            (wallet.total_transaction_num_7d or 0) > 0 or
-                            (wallet.total_transaction_num_1d or 0) > 0
+                            safe_int(wallet.total_transaction_num_30d) > 0 or
+                            safe_int(wallet.total_transaction_num_7d) > 0 or
+                            safe_int(wallet.total_transaction_num_1d) > 0
                         )
-                        
-                        # 如果沒有交易記錄，跳過這個錢包
                         if not has_transactions:
-                            logger.info(f"錢包 {wallet.wallet_address} 沒有交易記錄，跳過推送")
+                            logger.info(f"錢包 {wallet.wallet_address} 無交易記錄，跳過")
                             continue
 
-                        # 創建新的字典，首先添加必填項
-                        api_data = {
+                        wallet_data = {
                             "address": wallet.wallet_address,
-                            "chain": wallet.chain.upper() if wallet.chain else "SOLANA",
-                            "last_transaction_time": wallet.last_transaction_time,
-                            "isActive": wallet.is_active if wallet.is_active is not None else True,
-                            "walletType": wallet.wallet_type if wallet.wallet_type is not None else 0
+                            "tag": wallet.tag,
+                            "twitterName": wallet.twitter_name,
+                            "twitterUsername": wallet.twitter_username,
+                            "chain": wallet.chain,
+                            "last_transaction_time": safe_int(wallet.last_transaction_time),
+                            "isActive": wallet.is_active,
+                            "walletType": safe_int(wallet.wallet_type, 0),
+                            "balance": safe_number(wallet.balance),
+                            "balanceUsd": safe_number(wallet.balance_usd),
+                            "assetMultiple": safe_number(wallet.asset_multiple),
+                            "avgCost30d": safe_number(wallet.avg_cost_30d),
+                            "avgCost7d": safe_number(wallet.avg_cost_7d),
+                            "avgCost1d": safe_number(wallet.avg_cost_1d),
+                            "winRate30d": safe_number(wallet.win_rate_30d),
+                            "winRate7d": safe_number(wallet.win_rate_7d),
+                            "winRate1d": safe_number(wallet.win_rate_1d),
+                            "pnl30d": safe_number(wallet.pnl_30d),
+                            "pnl7d": safe_number(wallet.pnl_7d),
+                            "pnl1d": safe_number(wallet.pnl_1d),
+                            "pnlPercentage30d": safe_number(wallet.pnl_percentage_30d),
+                            "pnlPercentage7d": safe_number(wallet.pnl_percentage_7d),
+                            "pnlPercentage1d": safe_number(wallet.pnl_percentage_1d),
+                            "unrealizedProfit30d": safe_number(wallet.unrealized_profit_30d),
+                            "unrealizedProfit7d": safe_number(wallet.unrealized_profit_7d),
+                            "unrealizedProfit1d": safe_number(wallet.unrealized_profit_1d),
+                            "totalCost30d": safe_number(wallet.total_cost_30d),
+                            "totalCost7d": safe_number(wallet.total_cost_7d),
+                            "totalCost1d": safe_number(wallet.total_cost_1d),
+                            "avgRealizedProfit30d": safe_number(wallet.avg_realized_profit_30d),
+                            "avgRealizedProfit7d": safe_number(wallet.avg_realized_profit_7d),
+                            "avgRealizedProfit1d": safe_number(wallet.avg_realized_profit_1d),
+                            "distribution_gt500_percentage_30d": safe_number(wallet.distribution_gt500_percentage_30d),
+                            "distribution_200to500_percentage_30d": safe_number(wallet.distribution_200to500_percentage_30d),
+                            "distribution_0to200_percentage_30d": safe_number(wallet.distribution_0to200_percentage_30d),
+                            "distribution_0to50_percentage_30d": safe_number(wallet.distribution_0to50_percentage_30d),
+                            "distribution_lt50_percentage_30d": safe_number(wallet.distribution_lt50_percentage_30d),
+                            "distribution_gt500_percentage_7d": safe_number(wallet.distribution_gt500_percentage_7d),
+                            "distribution_200to500_percentage_7d": safe_number(wallet.distribution_200to500_percentage_7d),
+                            "distribution_0to200_percentage_7d": safe_number(wallet.distribution_0to200_percentage_7d),
+                            "distribution_0to50_percentage_7d": safe_number(wallet.distribution_0to50_percentage_7d),
+                            "distribution_lt50_percentage_7d": safe_number(wallet.distribution_lt50_percentage_7d),
+                            "tokenList": safe_str(wallet.token_list),
+                            "pnlPic30d": safe_str(wallet.pnl_pic_30d),
+                            "pnlPic7d": safe_str(wallet.pnl_pic_7d),
+                            "pnlPic1d": safe_str(wallet.pnl_pic_1d),
+                            "isSmartWallet": wallet.is_smart_wallet,
+                            "totalTransactionNum30d": safe_int(wallet.total_transaction_num_30d),
+                            "totalTransactionNum7d": safe_int(wallet.total_transaction_num_7d),
+                            "totalTransactionNum1d": safe_int(wallet.total_transaction_num_1d),
+                            "buyNum30d": safe_int(wallet.buy_num_30d),
+                            "buyNum7d": safe_int(wallet.buy_num_7d),
+                            "buyNum1d": safe_int(wallet.buy_num_1d),
+                            "sellNum30d": safe_int(wallet.sell_num_30d),
+                            "sellNum7d": safe_int(wallet.sell_num_7d),
+                            "sellNum1d": safe_int(wallet.sell_num_1d),
+                            "distribution_gt500_30d": safe_int(wallet.distribution_gt500_30d),
+                            "distribution_200to500_30d": safe_int(wallet.distribution_200to500_30d),
+                            "distribution_0to200_30d": safe_int(wallet.distribution_0to200_30d),
+                            "distribution_0to50_30d": safe_int(wallet.distribution_0to50_30d),
+                            "distribution_lt50_30d": safe_int(wallet.distribution_lt50_30d),
+                            "distribution_gt500_7d": safe_int(wallet.distribution_gt500_7d),
+                            "distribution_200to500_7d": safe_int(wallet.distribution_200to500_7d),
+                            "distribution_0to200_7d": safe_int(wallet.distribution_0to200_7d),
+                            "distribution_0to50_7d": safe_int(wallet.distribution_0to50_7d),
+                            "distribution_lt50_7d": safe_int(wallet.distribution_lt50_7d),
                         }
-                        
-                        # 添加餘額相關字段
-                        if hasattr(wallet, "balance") and wallet.balance is not None:
-                            api_data["balance"] = wallet.balance
-                        
-                        if hasattr(wallet, "balance_usd") and wallet.balance_usd is not None:
-                            api_data["balanceUsd"] = wallet.balance_usd
-                        
-                        # 添加標籤和社交媒體信息
-                        if hasattr(wallet, "tag") and wallet.tag:
-                            api_data["tag"] = wallet.tag
-                        
-                        if hasattr(wallet, "twitter_name") and wallet.twitter_name:
-                            api_data["twitterName"] = wallet.twitter_name
-                        
-                        if hasattr(wallet, "twitter_username") and wallet.twitter_username:
-                            api_data["twitterUsername"] = wallet.twitter_username
-                        
-                        # 添加錢包類型信息
-                        if hasattr(wallet, "is_smart_wallet") and wallet.is_smart_wallet is not None:
-                            api_data["isSmartWallet"] = wallet.is_smart_wallet
-                        
-                        if hasattr(wallet, "asset_multiple") and wallet.asset_multiple is not None:
-                            api_data["assetMultiple"] = wallet.asset_multiple
-                        
-                        if hasattr(wallet, "token_list") and wallet.token_list:
-                            api_data["tokenList"] = wallet.token_list
-                        
-                        # 添加交易數據
-                        if hasattr(wallet, "avg_cost_30d") and wallet.avg_cost_30d is not None:
-                            api_data["avgCost30d"] = wallet.avg_cost_30d
-                        
-                        if hasattr(wallet, "avg_cost_7d") and wallet.avg_cost_7d is not None:
-                            api_data["avgCost7d"] = wallet.avg_cost_7d
-                        
-                        if hasattr(wallet, "avg_cost_1d") and wallet.avg_cost_1d is not None:
-                            api_data["avgCost1d"] = wallet.avg_cost_1d
-                        
-                        if hasattr(wallet, "total_transaction_num_30d") and wallet.total_transaction_num_30d is not None:
-                            api_data["totalTransactionNum30d"] = wallet.total_transaction_num_30d
-                        
-                        if hasattr(wallet, "total_transaction_num_7d") and wallet.total_transaction_num_7d is not None:
-                            api_data["totalTransactionNum7d"] = wallet.total_transaction_num_7d
-                        
-                        if hasattr(wallet, "total_transaction_num_1d") and wallet.total_transaction_num_1d is not None:
-                            api_data["totalTransactionNum1d"] = wallet.total_transaction_num_1d
-                        
-                        if hasattr(wallet, "buy_num_30d") and wallet.buy_num_30d is not None:
-                            api_data["buyNum30d"] = wallet.buy_num_30d
-                        
-                        if hasattr(wallet, "buy_num_7d") and wallet.buy_num_7d is not None:
-                            api_data["buyNum7d"] = wallet.buy_num_7d
-                        
-                        if hasattr(wallet, "buy_num_1d") and wallet.buy_num_1d is not None:
-                            api_data["buyNum1d"] = wallet.buy_num_1d
-                        
-                        if hasattr(wallet, "sell_num_30d") and wallet.sell_num_30d is not None:
-                            api_data["sellNum30d"] = wallet.sell_num_30d
-                        
-                        if hasattr(wallet, "sell_num_7d") and wallet.sell_num_7d is not None:
-                            api_data["sellNum7d"] = wallet.sell_num_7d
-                        
-                        if hasattr(wallet, "sell_num_1d") and wallet.sell_num_1d is not None:
-                            api_data["sellNum1d"] = wallet.sell_num_1d
-                        
-                        if hasattr(wallet, "win_rate_30d") and wallet.win_rate_30d is not None:
-                            api_data["winRate30d"] = wallet.win_rate_30d
-                        
-                        if hasattr(wallet, "win_rate_7d") and wallet.win_rate_7d is not None:
-                            api_data["winRate7d"] = wallet.win_rate_7d
-                        
-                        if hasattr(wallet, "win_rate_1d") and wallet.win_rate_1d is not None:
-                            api_data["winRate1d"] = wallet.win_rate_1d
-                        
-                        # 添加盈虧數據
-                        if hasattr(wallet, "pnl_30d") and wallet.pnl_30d is not None:
-                            api_data["pnl30d"] = wallet.pnl_30d
-                        
-                        if hasattr(wallet, "pnl_7d") and wallet.pnl_7d is not None:
-                            api_data["pnl7d"] = wallet.pnl_7d
-                        
-                        if hasattr(wallet, "pnl_1d") and wallet.pnl_1d is not None:
-                            api_data["pnl1d"] = wallet.pnl_1d
-                        
-                        if hasattr(wallet, "pnl_percentage_30d") and wallet.pnl_percentage_30d is not None:
-                            api_data["pnlPercentage30d"] = wallet.pnl_percentage_30d
-                        
-                        if hasattr(wallet, "pnl_percentage_7d") and wallet.pnl_percentage_7d is not None:
-                            api_data["pnlPercentage7d"] = wallet.pnl_percentage_7d
-                        
-                        if hasattr(wallet, "pnl_percentage_1d") and wallet.pnl_percentage_1d is not None:
-                            api_data["pnlPercentage1d"] = wallet.pnl_percentage_1d
-                        
-                        if hasattr(wallet, "pnl_pic_30d") and wallet.pnl_pic_30d:
-                            api_data["pnlPic30d"] = wallet.pnl_pic_30d
-                        
-                        if hasattr(wallet, "pnl_pic_7d") and wallet.pnl_pic_7d:
-                            api_data["pnlPic7d"] = wallet.pnl_pic_7d
-                        
-                        if hasattr(wallet, "pnl_pic_1d") and wallet.pnl_pic_1d:
-                            api_data["pnlPic1d"] = wallet.pnl_pic_1d
-                        
-                        if hasattr(wallet, "unrealized_profit_30d") and wallet.unrealized_profit_30d is not None:
-                            api_data["unrealizedProfit30d"] = wallet.unrealized_profit_30d
-                        
-                        if hasattr(wallet, "unrealized_profit_7d") and wallet.unrealized_profit_7d is not None:
-                            api_data["unrealizedProfit7d"] = wallet.unrealized_profit_7d
-                        
-                        if hasattr(wallet, "unrealized_profit_1d") and wallet.unrealized_profit_1d is not None:
-                            api_data["unrealizedProfit1d"] = wallet.unrealized_profit_1d
-                        
-                        if hasattr(wallet, "total_cost_30d") and wallet.total_cost_30d is not None:
-                            api_data["totalCost30d"] = wallet.total_cost_30d
-                        
-                        if hasattr(wallet, "total_cost_7d") and wallet.total_cost_7d is not None:
-                            api_data["totalCost7d"] = wallet.total_cost_7d
-                        
-                        if hasattr(wallet, "total_cost_1d") and wallet.total_cost_1d is not None:
-                            api_data["totalCost1d"] = wallet.total_cost_1d
-                        
-                        if hasattr(wallet, "avg_realized_profit_30d") and wallet.avg_realized_profit_30d is not None:
-                            api_data["avgRealizedProfit30d"] = wallet.avg_realized_profit_30d
-                        
-                        if hasattr(wallet, "avg_realized_profit_7d") and wallet.avg_realized_profit_7d is not None:
-                            api_data["avgRealizedProfit7d"] = wallet.avg_realized_profit_7d
-                        
-                        if hasattr(wallet, "avg_realized_profit_1d") and wallet.avg_realized_profit_1d is not None:
-                            api_data["avgRealizedProfit1d"] = wallet.avg_realized_profit_1d
-                        
-                        # 添加收益分布數據
-                        if hasattr(wallet, "distribution_gt500_30d") and wallet.distribution_gt500_30d is not None:
-                            api_data["distribution_gt500_30d"] = wallet.distribution_gt500_30d
-                        
-                        if hasattr(wallet, "distribution_200to500_30d") and wallet.distribution_200to500_30d is not None:
-                            api_data["distribution_200to500_30d"] = wallet.distribution_200to500_30d
-                        
-                        if hasattr(wallet, "distribution_0to200_30d") and wallet.distribution_0to200_30d is not None:
-                            api_data["distribution_0to200_30d"] = wallet.distribution_0to200_30d
-                        
-                        if hasattr(wallet, "distribution_0to50_30d") and wallet.distribution_0to50_30d is not None:
-                            api_data["distribution_0to50_30d"] = wallet.distribution_0to50_30d
-                        
-                        if hasattr(wallet, "distribution_lt50_30d") and wallet.distribution_lt50_30d is not None:
-                            api_data["distribution_lt50_30d"] = wallet.distribution_lt50_30d
-                        
-                        if hasattr(wallet, "distribution_gt500_percentage_30d") and wallet.distribution_gt500_percentage_30d is not None:
-                            api_data["distribution_gt500_percentage_30d"] = wallet.distribution_gt500_percentage_30d
-                        
-                        if hasattr(wallet, "distribution_200to500_percentage_30d") and wallet.distribution_200to500_percentage_30d is not None:
-                            api_data["distribution_200to500_percentage_30d"] = wallet.distribution_200to500_percentage_30d
-                        
-                        if hasattr(wallet, "distribution_0to200_percentage_30d") and wallet.distribution_0to200_percentage_30d is not None:
-                            api_data["distribution_0to200_percentage_30d"] = wallet.distribution_0to200_percentage_30d
-                        
-                        if hasattr(wallet, "distribution_0to50_percentage_30d") and wallet.distribution_0to50_percentage_30d is not None:
-                            api_data["distribution_0to50_percentage_30d"] = wallet.distribution_0to50_percentage_30d
-                        
-                        if hasattr(wallet, "distribution_lt50_percentage_30d") and wallet.distribution_lt50_percentage_30d is not None:
-                            api_data["distribution_lt50_percentage_30d"] = wallet.distribution_lt50_percentage_30d
-                        
-                        if hasattr(wallet, "distribution_gt500_7d") and wallet.distribution_gt500_7d is not None:
-                            api_data["distribution_gt500_7d"] = wallet.distribution_gt500_7d
-                        
-                        if hasattr(wallet, "distribution_200to500_7d") and wallet.distribution_200to500_7d is not None:
-                            api_data["distribution_200to500_7d"] = wallet.distribution_200to500_7d
-                        
-                        if hasattr(wallet, "distribution_0to200_7d") and wallet.distribution_0to200_7d is not None:
-                            api_data["distribution_0to200_7d"] = wallet.distribution_0to200_7d
-                        
-                        if hasattr(wallet, "distribution_0to50_7d") and wallet.distribution_0to50_7d is not None:
-                            api_data["distribution_0to50_7d"] = wallet.distribution_0to50_7d
-                        
-                        if hasattr(wallet, "distribution_lt50_7d") and wallet.distribution_lt50_7d is not None:
-                            api_data["distribution_lt50_7d"] = wallet.distribution_lt50_7d
-                        
-                        if hasattr(wallet, "distribution_gt500_percentage_7d") and wallet.distribution_gt500_percentage_7d is not None:
-                            api_data["distribution_gt500_percentage_7d"] = wallet.distribution_gt500_percentage_7d
-                        
-                        if hasattr(wallet, "distribution_200to500_percentage_7d") and wallet.distribution_200to500_percentage_7d is not None:
-                            api_data["distribution_200to500_percentage_7d"] = wallet.distribution_200to500_percentage_7d
-                        
-                        if hasattr(wallet, "distribution_0to200_percentage_7d") and wallet.distribution_0to200_percentage_7d is not None:
-                            api_data["distribution_0to200_percentage_7d"] = wallet.distribution_0to200_percentage_7d
-                        
-                        if hasattr(wallet, "distribution_0to50_percentage_7d") and wallet.distribution_0to50_percentage_7d is not None:
-                            api_data["distribution_0to50_percentage_7d"] = wallet.distribution_0to50_percentage_7d
-                        
-                        if hasattr(wallet, "distribution_lt50_percentage_7d") and wallet.distribution_lt50_percentage_7d is not None:
-                            api_data["distribution_lt50_percentage_7d"] = wallet.distribution_lt50_percentage_7d
-                        
-                        # 添加更新時間
-                        # if hasattr(wallet, "update_time") and wallet.update_time is not None:
-                        #     api_data["update_time"] = wallet.update_time.isoformat() if isinstance(wallet.update_time, (datetime, date)) else wallet.update_time
-                        
-                        # 添加到結果列表
-                        result.append(api_data)
-                        
+
+                        result.append(wallet_data)
                     except Exception as e:
-                        logger.exception(f"處理錢包 {wallet.wallet_ddress} 數據時發生錯誤: {e}")
-                        # 如果處理單個錢包數據失敗，仍然添加必填項
-                        result.append({
-                            "address": wallet.wallet_address,
-                            "chain": wallet.chain.upper() if wallet.chain else "SOLANA",
-                            "last_transaction_time": wallet.last_transaction_time,
-                            "isActive": wallet.is_active if wallet.is_active is not None else True,
-                            "walletType": wallet.wallet_type if wallet.wallet_type is not None else 0
-                        })
-                
-                logger.info(f"已將 {len(result)} 個有交易記錄的錢包數據轉換為 API 所需格式")
-                
-                # 記錄樣本數據
-                if result and len(result) > 0:
-                    sample_data = {k: result[0][k] for k in ['address', 'chain', 'isActive', 'walletType'] if k in result[0]}
-                    logger.info(f"樣本數據（部分字段）: {sample_data}")
-                    
-                return result
-                    
+                        logger.exception(f"處理錢包 {wallet.wallet_address} 時發生錯誤: {e}")
+
         except Exception as e:
-            logger.exception(f"獲取錢包信息時發生錯誤: {e}")
-            return []
+            logger.exception(f"查詢錢包數據時發生錯誤: {e}")
+
+        return result
     
+    # async def _push_to_api(self, wallet_data: List[Dict[str, Any]]) -> bool:
+    #     """推送錢包信息到外部 API，所有 float 取到小數點後10位"""
+    #     def round_floats(obj):
+    #         if isinstance(obj, float):
+    #             return round(obj, 10)
+    #         elif isinstance(obj, dict):
+    #             return {k: round_floats(v) for k, v in obj.items()}
+    #         elif isinstance(obj, list):
+    #             return [round_floats(i) for i in obj]
+    #         else:
+    #             return obj
+
+    #     if not self.api_endpoint:
+    #         logger.error("未配置錢包同步 API 端點，無法推送數據")
+    #         return False
+                
+    #     headers = {"Content-Type": "application/json"}
+    #     # 對 wallet_data 做 round 處理
+    #     wallet_data = round_floats(wallet_data)
+    #     logger.info(f"準備推送 {len(wallet_data)} 個錢包數據到 API: {self.api_endpoint}")
+    #     for i, item in enumerate(wallet_data):
+    #         try:
+    #             json.dumps(item)
+    #         except TypeError as e:
+    #             logger.error(f"第 {i} 筆資料無法 JSON 序列化: {e}，內容為: {item}")
+        
+    #     try:
+    #         import json
+    #         logger.debug(f"請求數據: {json.dumps(wallet_data[:2])}")
+    #     except Exception as e:
+    #         logger.error(f"序列化請求數據時發生錯誤: {e}")
+        
+    #     if self.api_endpoint.startswith('https://') and ('127.0.0.1' in self.api_endpoint or 'localhost' in self.api_endpoint):
+    #         self.api_endpoint = self.api_endpoint.replace('https://', 'http://')
+    #         logger.info(f"檢測到本地服務器，已將 HTTPS 轉換為 HTTP: {self.api_endpoint}")
+        
+    #     for retry, delay in enumerate(self.retry_intervals):
+    #         try:
+    #             logger.info(f"嘗試推送數據到 API (嘗試 {retry+1}/{len(self.retry_intervals)})")
+                
+    #             connector = aiohttp.TCPConnector(ssl=False)
+                
+    #             timeout = aiohttp.ClientTimeout(total=120)
+                
+    #             async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+    #                 start_time = time.time()
+    #                 logger.info(f"開始 API 請求，超時設置為 120 秒")
+                    
+    #                 async with session.post(
+    #                     self.api_endpoint,
+    #                     headers=headers,
+    #                     json=wallet_data,
+    #                 ) as response:
+    #                     elapsed_time = time.time() - start_time
+    #                     logger.info(f"API 請求完成，耗時 {elapsed_time:.2f} 秒，狀態碼: {response.status}")
+                        
+    #                     response_text = await response.text()
+                        
+    #                     if response.status == 200:
+    #                         logger.info(f"成功推送數據到 API，響應: {response_text[:100]}...")
+    #                         return True
+    #                     else:
+    #                         logger.error(f"API 請求失敗，狀態碼: {response.status}, 錯誤: {response_text}")
+                            
+    #                         if retry == len(self.retry_intervals) - 1:
+    #                             return False
+                                
+    #                         logger.info(f"將在 {delay} 秒後重試 (嘗試 {retry+1}/{len(self.retry_intervals)})")
+    #                         await asyncio.sleep(delay)
+                            
+    #         except asyncio.TimeoutError:
+    #             logger.error(f"API 請求超時 (120秒)")
+    #             if retry == len(self.retry_intervals) - 1:
+    #                 return False
+    #             logger.info(f"將在 {delay} 秒後重試 (嘗試 {retry+1}/{len(self.retry_intervals)})")
+    #             await asyncio.sleep(delay)
+                
+    #         except aiohttp.client_exceptions.ClientConnectorError as e:
+    #             logger.error(f"連接 API 失敗: {e}")
+                
+    #             # 檢查 API 端點格式
+    #             if not self.api_endpoint.startswith(('http://', 'https://')):
+    #                 self.api_endpoint = f"http://{self.api_endpoint}"
+    #                 logger.info(f"已修復 API 端點格式: {self.api_endpoint}")
+    #                 continue
+                    
+    #             if retry == len(self.retry_intervals) - 1:
+    #                 return False
+    #             logger.info(f"將在 {delay} 秒後重試 (嘗試 {retry+1}/{len(self.retry_intervals)})")
+    #             await asyncio.sleep(delay)
+                
+    #         except Exception as e:
+    #             logger.exception(f"推送到 API 時發生錯誤: {e}")
+    #             if retry == len(self.retry_intervals) - 1:
+    #                 return False
+    #             logger.info(f"將在 {delay} 秒後重試 (嘗試 {retry+1}/{len(self.retry_intervals)})")
+    #             await asyncio.sleep(delay)
+                
+    #     return False
+
     async def _push_to_api(self, wallet_data: List[Dict[str, Any]]) -> bool:
-        """推送錢包信息到外部 API"""
+        """推送錢包信息到外部 API，所有 float 取到小數點後10位"""
+        
+        def round_floats(obj):
+            if isinstance(obj, float):
+                return round(obj, 10)
+            elif isinstance(obj, dict):
+                return {k: round_floats(v) for k, v in obj.items()}
+            elif isinstance(obj, list):
+                return [round_floats(i) for i in obj]
+            else:
+                return obj
+
         if not self.api_endpoint:
             logger.error("未配置錢包同步 API 端點，無法推送數據")
             return False
                 
         headers = {"Content-Type": "application/json"}
-        logger.info(f"準備推送 {len(wallet_data)} 個錢包數據到 API: {self.api_endpoint}")
+        # 對 wallet_data 做 round 處理
+        wallet_data = round_floats(wallet_data)
+        # logger.info(f"準備推送 {len(wallet_data)} 個錢包數據到 API: {self.api_endpoint}")
         
         try:
-            import json
             logger.debug(f"請求數據: {json.dumps(wallet_data[:2])}")
         except Exception as e:
             logger.error(f"序列化請求數據時發生錯誤: {e}")
@@ -489,7 +461,7 @@ class WalletSyncService:
         
         for retry, delay in enumerate(self.retry_intervals):
             try:
-                logger.info(f"嘗試推送數據到 API (嘗試 {retry+1}/{len(self.retry_intervals)})")
+                # logger.info(f"嘗試推送數據到 API (嘗試 {retry+1}/{len(self.retry_intervals)})")
                 
                 connector = aiohttp.TCPConnector(ssl=False)
                 
@@ -497,7 +469,7 @@ class WalletSyncService:
                 
                 async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
                     start_time = time.time()
-                    logger.info(f"開始 API 請求，超時設置為 120 秒")
+                    # logger.info(f"開始 API 請求，超時設置為 120 秒")
                     
                     async with session.post(
                         self.api_endpoint,
@@ -505,12 +477,12 @@ class WalletSyncService:
                         json=wallet_data,
                     ) as response:
                         elapsed_time = time.time() - start_time
-                        logger.info(f"API 請求完成，耗時 {elapsed_time:.2f} 秒，狀態碼: {response.status}")
+                        # logger.info(f"API 請求完成，耗時 {elapsed_time:.2f} 秒，狀態碼: {response.status}")
                         
                         response_text = await response.text()
                         
                         if response.status == 200:
-                            logger.info(f"成功推送數據到 API，響應: {response_text[:100]}...")
+                            logger.info(f"成功推送數據到後端wallet API，響應: {response_text[:100]}...")
                             return True
                         else:
                             logger.error(f"API 請求失敗，狀態碼: {response.status}, 錯誤: {response_text}")

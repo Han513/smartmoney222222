@@ -1,7 +1,7 @@
 import logging
 import asyncio
 from typing import Set, Optional
-from sqlalchemy import select
+from sqlalchemy import select, text
 from app.models.models import WalletSummary
 from app.core.db import get_session_factory
 from app.services.cache_service import cache_service
@@ -40,6 +40,9 @@ class WalletCacheService:
         """從數據庫加載所有錢包地址到緩存"""
         try:
             with self.session_factory() as session:
+                result = session.execute(text("SELECT wallet_address FROM dex_query_v1.wallet WHERE chain = :chain"), {'chain': 'SOLANA'})
+                wallets = result.fetchall()
+                session.execute(text("SET search_path TO dex_query_v1;"))
                 # 查詢所有SOLANA錢包地址
                 stmt = select(WalletSummary.wallet_address).where(WalletSummary.chain == 'SOLANA')
                 addresses = session.execute(stmt).scalars().all()
