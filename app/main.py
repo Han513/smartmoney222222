@@ -53,10 +53,10 @@ async def lifespan(app: FastAPI):
     """
     # 啟動時執行的操作
     logger.info("Starting up the application...")
-    logger.info(f"環境設定: {settings.model_config}")
+    # logger.info(f"環境設定: {settings.model_config}")
     
     # 記錄資料庫設定
-    logger.info(f"資料庫 URL: {settings.DATABASE_URL}")
+    # logger.info(f"資料庫 URL: {settings.DATABASE_URL}")
     logger.info(f"資料庫功能: {'啟用' if settings.DB_ENABLED else '停用'}")
     
     # 初始化 transaction_processor
@@ -87,25 +87,25 @@ async def lifespan(app: FastAPI):
         logger.warning("錢包緩存服務初始化問題不會阻止應用啟動，但消息處理功能可能無法正常工作")
 
     # 初始化 Kafka 消費者
-    try:
-        logger.info("初始化 Kafka 消費者...")
-        kafka_start_result = await kafka_consumer.start()
-        if kafka_start_result:
-            logger.info("Kafka 消費者服務已成功啟動")
-        else:
-            logger.warning("Kafka 消費者服務啟動失敗，但應用程式仍會繼續啟動")
-    except Exception as e:
-        logger.error(f"初始化 Kafka 消費者時發生錯誤: {e}")
-        logger.warning("Kafka 消費者初始化問題不會阻止應用啟動，但即時交易更新功能可能無法正常工作")
+    # try:
+    #     logger.info("初始化 Kafka 消費者...")
+    #     kafka_start_result = await kafka_consumer.start()
+    #     if kafka_start_result:
+    #         logger.info("Kafka 消費者服務已成功啟動")
+    #     else:
+    #         logger.warning("Kafka 消費者服務啟動失敗，但應用程式仍會繼續啟動")
+    # except Exception as e:
+    #     logger.error(f"初始化 Kafka 消費者時發生錯誤: {e}")
+    #     logger.warning("Kafka 消費者初始化問題不會阻止應用啟動，但即時交易更新功能可能無法正常工作")
 
     # 初始化消息處理器
-    try:
-        logger.info("初始化消息處理器...")
-        await message_processor.start()
-        logger.info("消息處理器已成功啟動")
-    except Exception as e:
-        logger.error(f"初始化消息處理器時發生錯誤: {e}")
-        logger.warning("消息處理器初始化問題不會阻止應用啟動，但消息處理功能可能無法正常工作")
+    # try:
+    #     logger.info("初始化消息處理器...")
+    #     await message_processor.start()
+    #     logger.info("消息處理器已成功啟動")
+    # except Exception as e:
+    #     logger.error(f"初始化消息處理器時發生錯誤: {e}")
+    #     logger.warning("消息處理器初始化問題不會阻止應用啟動，但消息處理功能可能無法正常工作")
 
     try:
         logger.info("啟動錢包同步服務...")
@@ -114,6 +114,16 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"啟動錢包同步服務時發生錯誤: {e}")
         logger.warning("錢包同步服務啟動問題不會阻止應用啟動，但錢包數據同步功能可能無法正常工作")
+
+    # 初始化 Kafka 生產者
+    # try:
+    #     logger.info("初始化 Kafka 生產者...")
+    #     from app.workers.kafka_producer import wallet_analysis_producer
+    #     await wallet_analysis_producer.start()
+    #     logger.info("Kafka 生產者已成功初始化")
+    # except Exception as e:
+    #     logger.error(f"初始化 Kafka 生產者時發生錯誤: {e}")
+    #     logger.warning("Kafka 生產者初始化問題不會阻止應用啟動，但錢包分析任務提交功能可能無法正常工作")
     
     # 日誌所有路由
     routes = []
@@ -169,14 +179,14 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error(f"關閉數據庫連接時發生錯誤: {e}")
 
-    try:
-        logger.info("正在關閉 Celery 連接...")
-        from app.workers.tasks import celery_app
-        celery_app.control.purge()  # 清空任務隊列
-        celery_app.close()  # 關閉連接
-        logger.info("Celery 連接已成功關閉")
-    except Exception as e:
-        logger.error(f"關閉 Celery 連接時發生錯誤: {e}")
+    # 關閉 Kafka 生產者
+    # try:
+    #     logger.info("正在關閉 Kafka 生產者...")
+    #     from app.workers.kafka_producer import wallet_analysis_producer
+    #     await wallet_analysis_producer.stop()
+    #     logger.info("Kafka 生產者已成功關閉")
+    # except Exception as e:
+    #     logger.error(f"關閉 Kafka 生產者時發生錯誤: {e}")
 
     try:
         logger.info("停止錢包同步服務...")

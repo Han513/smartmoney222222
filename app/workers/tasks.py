@@ -42,6 +42,10 @@ celery_app.conf.update(
 @worker_process_init.connect
 def init_worker(**kwargs):
     """Worker初始化时创建事件循环和設置日誌"""
+    # 設置環境變量，標識當前在 Celery worker 環境中運行
+    import os
+    os.environ['CELERY_WORKER_RUNNING'] = '1'
+    
     # 簡單的日誌配置
     import logging
     import os
@@ -68,38 +72,58 @@ def shutdown_worker(**kwargs):
 
 # 异步任务包装器
 def run_async_task(coro):
-    """运行异步任务的包装函数"""
+    """在 Celery task 中安全地執行 asyncio coroutine"""
     try:
-        # 創建新的事件循環
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
+        # 首先尝试获取当前事件循环
         try:
-            return loop.run_until_complete(coro)
-        finally:
-            loop.close()
-    except Exception as e:
-        logger.exception(f"運行異步任務時發生錯誤: {str(e)}")
-        raise
+            loop = asyncio.get_running_loop()
+            # 如果已经有运行中的循环，创建一个新任务
+            import concurrent.futures
+            with concurrent.futures.ThreadPoolExecutor() as executor:
+                future = executor.submit(asyncio.run, coro)
+                return future.result()
+        except RuntimeError:
+            # 没有运行中的循环，直接使用asyncio.run
+            return asyncio.run(coro)
+    except RuntimeError as e:
+        if "event loop is closed" in str(e) or "attached to a different loop" in str(e):
+            # 创建新的事件循环
+            try:
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                try:
+                    return loop.run_until_complete(coro)
+                finally:
+                    loop.close()
+            except Exception as nested_e:
+                logger.error(f"创建新事件循环失败: {str(nested_e)}")
+                # 最后的回退方案：使用线程池
+                import concurrent.futures
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    future = executor.submit(asyncio.run, coro)
+                    return future.result()
+        else:
+            raise
 
-# 处理单个钱包的任务
-@celery_app.task(name="app.workers.tasks.process_single_wallet")
-def process_single_wallet(
+# 处理单个钱包的函数（非Celery任务版本）
+def _process_single_wallet_internal(
     address, 
     time_range=7, 
     include_metrics=None, 
     request_id=None, 
     chain="SOLANA",
     twitter_name=None,  # 新增 Twitter 名稱參數
-    twitter_username=None  # 新增 Twitter 用戶名參數
+    twitter_username=None,  # 新增 Twitter 用戶名參數
+    is_smart_wallet=False
 ):
-    """处理单个钱包分析的Celery任务"""
+    """处理单个钱包分析的内部函数（非Celery任务）"""
     from app.services.wallet_analyzer import wallet_analyzer
     from app.services.cache_service import cache_service
     from app.models.models import WalletSummary
     from app.core.db import get_session_factory
     
     try:
-        logger.info(f"开始处理钱包任务: {address}, 链: {chain}, 请求ID: {request_id}")
+        logger.info(f"开始处理钱包任务: {address}, 链: {chain}, 请求ID: {request_id}, is_smart_wallet: {is_smart_wallet}")
         start_time = time.time()
         
         # 運行異步分析函數
@@ -109,11 +133,12 @@ def process_single_wallet(
             include_metrics=include_metrics,
             chain=chain,
             twitter_name=twitter_name,
-            twitter_username=twitter_username
+            twitter_username=twitter_username,
+            is_smart_wallet=is_smart_wallet
         ))
         
-        # 如果提供了 Twitter 資訊，更新錢包摘要表
-        if twitter_name or twitter_username:
+        # 如果提供了 Twitter 資訊或 is_smart_wallet 標記，更新錢包摘要表
+        if twitter_name or twitter_username or is_smart_wallet:
             session_factory = get_session_factory()
             with session_factory() as session:
                 # 檢查是否已存在記錄
@@ -123,19 +148,20 @@ def process_single_wallet(
                 ).values(
                     twitter_name=twitter_name,
                     twitter_username=twitter_username,
+                    is_smart_wallet=is_smart_wallet,
                     is_active=True
                 )
                 session.execute(stmt)
                 session.commit()
-                logger.info(f"已更新錢包 {address} 的 Twitter 資訊")
+                logger.info(f"已更新錢包 {address} 的資訊 (Twitter: {twitter_name}, is_smart_wallet: {is_smart_wallet})")
         
         # 更新缓存
         run_async_task(cache_service.set(f"wallet:{chain}:{address}", result, expiry=3600))
         
         # 如果有请求ID，更新请求状态
         if request_id:
-            async def update_req_status():
-                req_status = await cache_service.get(f"req:{request_id}")
+            def update_req_status():
+                req_status = run_async_task(cache_service.get(f"req:{request_id}"))
                 if req_status:
                     if address in req_status.get("pending_addresses", []):
                         req_status["pending_addresses"].remove(address)
@@ -146,8 +172,8 @@ def process_single_wallet(
                         "metrics": result,
                         "last_updated": int(time.time())
                     }
-                    await cache_service.set(f"req:{request_id}", req_status, expiry=3600)
-            run_async_task(update_req_status())
+                    run_async_task(cache_service.set(f"req:{request_id}", req_status, expiry=3600))
+            update_req_status()
         
         processing_time = time.time() - start_time
         logger.info(f"钱包 {address} 处理完成，耗时 {processing_time:.2f}秒")
@@ -158,6 +184,30 @@ def process_single_wallet(
         return {"status": "error", "address": address, "error": str(e)}
     finally:
         run_async_task(cache_service.delete(f"processing:{chain}:{address}"))
+
+# 处理单个钱包的任务
+@celery_app.task(name="app.workers.tasks.process_single_wallet")
+def process_single_wallet(
+    address, 
+    time_range=7, 
+    include_metrics=None, 
+    request_id=None, 
+    chain="SOLANA",
+    twitter_name=None,  # 新增 Twitter 名稱參數
+    twitter_username=None,  # 新增 Twitter 用戶名參數
+    is_smart_wallet=False
+):
+    """处理单个钱包分析的Celery任务"""
+    return _process_single_wallet_internal(
+        address=address,
+        time_range=time_range,
+        include_metrics=include_metrics,
+        request_id=request_id,
+        chain=chain,
+        twitter_name=twitter_name,
+        twitter_username=twitter_username,
+        is_smart_wallet=is_smart_wallet
+    )
 
 # 批量处理钱包的任务
 @celery_app.task(name="app.workers.tasks.process_wallet_batch", bind=True)
@@ -170,13 +220,13 @@ def process_wallet_batch(
     batch_index=0, 
     chain="SOLANA",
     twitter_names=None,
-    twitter_usernames=None
+    twitter_usernames=None,
+    is_smart_wallet=False
 ):
     """處理一批錢包地址的Celery任務"""
     start_time = time.time()
     total_wallets = len(addresses)
     logger.info(f"==== 開始處理批次 {batch_index}, 包含 {total_wallets} 個地址，請求ID: {request_id} ====")
-    logger.info(f"處理鏈：{chain}")
     
     # 初始化 Twitter 資訊列表
     twitter_names = twitter_names if twitter_names else [None] * len(addresses)
@@ -195,14 +245,16 @@ def process_wallet_batch(
     # 直接處理每個地址，而不是創建新的任務
     for i, address in enumerate(addresses):
         try:
-            result = process_single_wallet(
+            # 直接調用內部函數，而不是創建 Celery 任務
+            result = _process_single_wallet_internal(
                 address=address,
                 time_range=time_range,
                 include_metrics=include_metrics,
                 request_id=request_id,
                 chain=chain,
                 twitter_name=twitter_names[i],
-                twitter_username=twitter_usernames[i]
+                twitter_username=twitter_usernames[i],
+                is_smart_wallet=is_smart_wallet
             )
             results.append({"address": address, "status": "success", "result": result})
         except Exception as e:
@@ -283,9 +335,8 @@ def remove_wallet_data_batch(self, request_id, addresses, batch_index=0, chain="
                 logger.info(f"已删除钱包 {address} 的数据: WalletSummary={wallet_summary_deleted}, Holding={holding_deleted}, Transaction={transaction_deleted}, TokenBuyData={token_buy_deleted}")
                 
                 # 更新请求状态
-                async def update_req_status():
-                    # 获取当前请求状态
-                    req_status = await cache_service.get(f"req:{request_id}")
+                def update_req_status():
+                    req_status = run_async_task(cache_service.get(f"req:{request_id}"))
                     if req_status:
                         # 更新状态
                         if address in req_status.get("pending_addresses", []):
@@ -303,9 +354,9 @@ def remove_wallet_data_batch(self, request_id, addresses, batch_index=0, chain="
                         }
                         
                         # 保存更新后的状态
-                        await cache_service.set(f"req:{request_id}", req_status, expiry=3600)
+                        run_async_task(cache_service.set(f"req:{request_id}", req_status, expiry=3600))
                 
-                run_async_task(update_req_status())
+                update_req_status()
                 
                 results.append({
                     "address": address, 
@@ -360,3 +411,7 @@ def clean_expired_cache():
 def setup_periodic_tasks(sender, **kwargs):
     # 每小時清理過期快取
     sender.add_periodic_task(3600.0, clean_expired_cache.s(), name='clean expired cache')
+
+@celery_app.task
+def test_redis_connection(x):
+    print(f"Test task received: {x}")

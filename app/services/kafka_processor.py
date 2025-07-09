@@ -402,8 +402,8 @@ class MessageProcessor:
         self.message_queue_key = "kafka_message_queue"
         self.processing_queue_key = "kafka_processing_queue"
         self.max_retries = 3
-        self.batch_size = 10  # 每次處理的批次大小
-        self.processing_interval = 1.0  # 處理間隔(秒)
+        self.batch_size = 5  # 減少批次大小，提高處理速度
+        self.processing_interval = 0.5  # 減少處理間隔，更快處理消息
         self.error_backoff = {
             0: 5,    # 首次錯誤等待5秒
             1: 30,   # 第二次錯誤等待30秒
@@ -473,7 +473,7 @@ class MessageProcessor:
                         message = await cache_service.get(f"{self.cache_key_prefix}{msg_id}")
 
                         if not message:
-                            logger.warning(f"消息 {msg_id} 不存在或已過期")
+                            # logger.warning(f"消息 {msg_id} 不存在或已過期")
                             await cache_service.remove_list_item(self.processing_queue_key, msg_id)
                             continue
 
@@ -489,7 +489,7 @@ class MessageProcessor:
                             await cache_service.set(
                                 f"{self.cache_key_prefix}{msg_id}",
                                 message,
-                                expiry=7 * 24 * 3600  # 保留7天
+                                expiry=24 * 3600  # 保留24小時
                             )
                         else:
                             # 處理失敗，根據重試次數決定下一步
@@ -520,7 +520,7 @@ class MessageProcessor:
                             await cache_service.set(
                                 f"{self.cache_key_prefix}{msg_id}",
                                 message,
-                                expiry=7 * 24 * 3600
+                                expiry=24 * 3600  # 24小時過期
                             )
 
                     # 批次處理完成後，短暫休息
@@ -561,6 +561,13 @@ class MessageProcessor:
             price = float(event["price"])
             amount = float(event["txnValue"])
             timestamp = int(event["timestamp"])
+            
+            # 檢查是否已經處理過這個交易（基於signature去重）
+            processed_key = f"processed_transaction:{txn_hash}"
+            existing_processed = await cache_service.get(processed_key)
+            if existing_processed:
+                logger.info(f"跳過已處理的交易: {txn_hash}")
+                return True
             
             # 檢查並修正timestamp (如果是毫秒格式轉換為秒)
             if timestamp > 10**12:  # 判斷是否為毫秒時間戳 (13位數)
@@ -619,6 +626,13 @@ class MessageProcessor:
 
             if save_result:
                 logger.info(f"成功保存交易: {txn_hash}")
+
+                # 標記交易為已處理
+                await cache_service.set(
+                    processed_key,
+                    {"processed_at": int(time.time())},
+                    expiry=3600  # 1小時過期
+                )
 
                 # 更新 WalletTokenState 緩存
                 transaction_processor._update_wallet_token_state_after_transaction(

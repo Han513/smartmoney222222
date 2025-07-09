@@ -14,59 +14,35 @@ services:
       - redis
       - db
     environment:
-      - DATABASE_URL=postgresql+asyncpg://test_pg01_rwuser01:E2#dN4c6d5Mz@pgm-3nsj7dpddb23873d.pg.rds.aliyuncs.com:5432/smart_money
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
+      - DATABASE_URL=${DATABASE_URI_Solana}
+      - REDIS_URL=${REDIS_URL:-redis://redis:6379/0}
+      - CELERY_BROKER_URL=${CELERY_BROKER_URL:-redis://redis:6379/1}
+      - CELERY_RESULT_BACKEND=${CELERY_RESULT_BACKEND:-redis://redis:6379/1}
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:9092}
+      - WALLET_ANALYSIS_TOPIC=${WALLET_ANALYSIS_TOPIC:-wallet_analysis_tasks}
       - API_TITLE=SmartMoney API
       - API_DESCRIPTION=智能錢包分析API
       - API_VERSION=1.0.0
       - API_PREFIX=/api
       - DB_ENABLED=true
-      - ENVIRONMENT=testing
-      - SECRET_KEY=change_this_to_a_secure_random_string
-      - API_KEYS=test_api_key_1,test_api_key_2
-      - SOLSCAN_API_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M
-      - SOLSCAN_API_URL=https://pro-api.solscan.io/v2.0
-      - WALLET_SYNC_API_ENDPOINT=http://moonx.backend:4200/internal/sync_kol_wallets
+      - ENVIRONMENT=${ENVIRONMENT:-production}
+      - SECRET_KEY=${SECRET_KEY:-change_this_to_a_secure_random_string}
+      - API_KEYS=${API_KEYS:-test_api_key_1,test_api_key_2}
+      - SOLSCAN_API_TOKEN=${SOLSCAN_API_TOKEN}
+      - SOLSCAN_API_URL=${SOLSCAN_API_URL:-https://pro-api.solscan.io/v2.0}
+      - WALLET_SYNC_API_ENDPOINT=${WALLET_SYNC_API_ENDPOINT}
       - MAX_CONCURRENT_REQUESTS=100
       - MAX_ADDRESSES_PER_REQUEST=300
       - MAX_WORKER_PROCESSES=5
       - CACHE_TTL_SECONDS=3600
+      - LOG_FILE=/app/logs/api.log
+
     volumes:
       - ./:/app
       - ./app/logs:/app/logs
     networks:
       - smartmoney-network
     command: python run.py
-
-  # Celery worker 服務
-  worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
-    container_name: smartmoney-worker
-    restart: always
-    depends_on:
-      - redis
-      - db
-      - api
-    environment:
-      - DATABASE_URL=postgresql+asyncpg://test_pg01_rwuser01:E2#dN4c6d5Mz@pgm-3nsj7dpddb23873d.pg.rds.aliyuncs.com:5432/smart_money
-      - REDIS_URL=redis://redis:6379/0
-      - CELERY_BROKER_URL=redis://redis:6379/1
-      - CELERY_RESULT_BACKEND=redis://redis:6379/1
-      - DB_ENABLED=true
-      - ENVIRONMENT=testing
-      - SOLSCAN_API_TOKEN=eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJjcmVhdGVkQXQiOjE3NDQxODI3MTA0MzksImVtYWlsIjoid2lubmlmb3J3b3JrQGdtYWlsLmNvbSIsImFjdGlvbiI6InRva2VuLWFwaSIsImFwaVZlcnNpb24iOiJ2MiIsImlhdCI6MTc0NDE4MjcxMH0.T7ofb-SMx2PHAompUQhjBbCNyubwyAZ0IuOp71aMC_M
-      - SOLSCAN_API_URL=https://pro-api.solscan.io/v2.0
-      - MAX_ADDRESSES_PER_REQUEST=300
-    volumes:
-      - ./:/app
-      - ./app/logs:/app/logs
-    networks:
-      - smartmoney-network
-    command: python start_worker.py
 
   # Redis 服務 - 用於快取和消息佇列
   redis:

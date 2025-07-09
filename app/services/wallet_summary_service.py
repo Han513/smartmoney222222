@@ -91,8 +91,12 @@ class WalletSummaryService:
                     logger.info(f"錢包 {wallet_address} 的記錄已存在，已更新餘額和時間")
                     try:
                         logger.info(f"正在將錢包 {wallet_address} 添加到同步隊列...")
-                        await wallet_sync_service.add_wallet(wallet_address)
-                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                        # 在 Celery worker 中避免使用異步服務
+                        if not self._is_celery_worker():
+                            await wallet_sync_service.add_wallet(wallet_address)
+                            logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                        else:
+                            logger.info(f"在 Celery worker 中跳過同步操作")
                     except Exception as e:
                         logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
                         
@@ -107,7 +111,8 @@ class WalletSummaryService:
         wallet_address: str, 
         tx_stats: Dict[str, Any] = None,
         twitter_name: Optional[str] = None,
-        twitter_username: Optional[str] = None
+        twitter_username: Optional[str] = None,
+        is_smart_wallet: bool = False
     ) -> bool:
         """
         完整更新錢包摘要（用於歷史數據分析）
@@ -117,6 +122,7 @@ class WalletSummaryService:
             tx_stats: 預先計算的交易統計數據（可選）
             twitter_name: Twitter 名稱（可選）
             twitter_username: Twitter 用戶名（可選）
+            is_smart_wallet: 是否為智能錢包（可選）
             
         Returns:
             bool: 更新是否成功
@@ -138,7 +144,7 @@ class WalletSummaryService:
                     "balance_usd": balance_usd,
                     "chain": "SOLANA",
                     "tag": "kol" if twitter_name and twitter_username else None,
-                    "is_smart_wallet": True if twitter_name and twitter_username else False,
+                    "is_smart_wallet": is_smart_wallet,
                     "chain_id": 501,
                     "wallet_type": 0,
                     "is_active": True,
@@ -162,8 +168,12 @@ class WalletSummaryService:
                 logger.info(f"成功完整更新錢包 {wallet_address} 的摘要記錄")
                 try:
                     logger.info(f"正在將錢包 {wallet_address} 添加到同步隊列...")
-                    await wallet_sync_service.add_wallet(wallet_address)
-                    logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                    # 在 Celery worker 中避免使用異步服務
+                    if not self._is_celery_worker():
+                        await wallet_sync_service.add_wallet(wallet_address)
+                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                    else:
+                        logger.info(f"在 Celery worker 中跳過同步操作")
                 except Exception as e:
                     logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
 
@@ -206,7 +216,15 @@ class WalletSummaryService:
                 
                 session.commit()
                 logger.info(f"成功部分更新錢包 {wallet_address} 的摘要記錄")
-                await wallet_sync_service.add_wallet(wallet_address)
+                try:
+                    # 在 Celery worker 中避免使用異步服務
+                    if not self._is_celery_worker():
+                        await wallet_sync_service.add_wallet(wallet_address)
+                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                    else:
+                        logger.info(f"在 Celery worker 中跳過同步操作")
+                except Exception as e:
+                    logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
 
                 return True
                 
@@ -254,7 +272,15 @@ class WalletSummaryService:
                 
                 session.commit()
                 logger.info(f"成功更新錢包 {wallet_address} 的交易計數")
-                await wallet_sync_service.add_wallet(wallet_address)
+                try:
+                    # 在 Celery worker 中避免使用異步服務
+                    if not self._is_celery_worker():
+                        await wallet_sync_service.add_wallet(wallet_address)
+                        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
+                    else:
+                        logger.info(f"在 Celery worker 中跳過同步操作")
+                except Exception as e:
+                    logger.error(f"將錢包 {wallet_address} 添加到同步隊列時發生錯誤: {e}")
                 
                 return True
                 
@@ -292,6 +318,29 @@ class WalletSummaryService:
             wallet_summary.sell_num_1d = (wallet_summary.sell_num_1d or 0) + 1
             wallet_summary.sell_num_7d = (wallet_summary.sell_num_7d or 0) + 1
             wallet_summary.sell_num_30d = (wallet_summary.sell_num_30d or 0) + 1
+
+    def _is_celery_worker(self):
+        """檢測當前是否在 Celery worker 環境中運行"""
+        try:
+            import os
+            # 檢查環境變量
+            if os.environ.get('CELERY_WORKER_RUNNING'):
+                return True
+            
+            # 檢查進程名稱（備用方案）
+            try:
+                import psutil
+                current_process = psutil.Process()
+                process_name = current_process.name().lower()
+                if 'celery' in process_name or 'worker' in process_name:
+                    return True
+            except Exception:
+                pass
+                
+            return False
+        except Exception:
+            # 如果檢測失敗，默認返回 False（允許同步操作）
+            return False
 
 # 創建單例實例
 wallet_summary_service = WalletSummaryService()

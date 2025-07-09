@@ -62,7 +62,7 @@ class Settings(BaseSettings):
     SOLSCAN_API_TOKEN: str = os.getenv("SOLSCAN_API_TOKEN", "1234567890")
     SOLSCAN_API_URL: str = os.getenv("SOLSCAN_API_URL", "https://pro-api.solscan.io/v2.0")
 
-    WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://moonx.backend:4200/internal/sync_kol_wallets")
+    WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://172.16.60.141:30008/internal/sync_kol_wallets")
 
     # 系統限制
     MAX_CONCURRENT_REQUESTS: int = 10

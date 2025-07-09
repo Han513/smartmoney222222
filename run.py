@@ -75,7 +75,7 @@ if __name__ == "__main__":
     # 獲取 CPU 核心數
     cpu_count = multiprocessing.cpu_count()
     # 設置 worker 數為 CPU 核心數(最多 8 個)
-    workers = min(cpu_count, 8)
+    workers = min(cpu_count, 1)
     
     logger.info(f"系統 CPU 核心數: {cpu_count}")
     logger.info(f"設置 worker 數量: {workers}")

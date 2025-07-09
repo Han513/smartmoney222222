@@ -50,7 +50,15 @@
 #         try:
 #             redis = await self.get_redis()
 #             json_value = json.dumps(value)
-#             await redis.set(key, json_value, ex=expiry)
+#             
+#             # 檢查是否為同步 Redis 客戶端
+#             if hasattr(redis, 'set') and not asyncio.iscoroutinefunction(redis.set):
+#                 # 同步 Redis 客戶端
+#                 redis.set(key, json_value, ex=expiry)
+#             else:
+#                 # 異步 Redis 客戶端
+#                 await redis.set(key, json_value, ex=expiry)
+            
 #             return True
 #         except Exception as e:
 #             logger.error(f"設置快取失敗 ({key}): {str(e)}")
@@ -127,8 +135,14 @@
 #         try:
 #             redis = await self.get_redis()
             
-#             # 使用 mget 批量獲取
-#             values = await redis.mget(keys)
+#             # 檢查是否為同步 Redis 客戶端
+#             if hasattr(redis, 'mget') and not asyncio.iscoroutinefunction(redis.mget):
+#                 # 同步 Redis 客戶端
+#                 values = redis.mget(keys)
+#             else:
+#                 # 異步 Redis 客戶端
+#                 values = await redis.mget(keys)
+            
 #             result = {}
             
 #             for i, value in enumerate(values):
@@ -166,17 +180,35 @@
             
 #         try:
 #             redis = await self.get_redis()
-#             pipeline = redis.pipeline()
-            
-#             for key, value in mapping.items():
-#                 try:
-#                     json_value = json.dumps(value)
-#                     pipeline.set(key, json_value, ex=expiry)
-#                 except Exception as e:
-#                     logger.error(f"序列化 {key} 失敗: {str(e)}")
-#                     continue
-            
-#             await pipeline.execute()
+#             
+#             # 檢查是否為同步 Redis 客戶端
+#             if hasattr(redis, 'pipeline') and not asyncio.iscoroutinefunction(redis.pipeline):
+#                 # 同步 Redis 客戶端
+#                 pipeline = redis.pipeline()
+#                 
+#                 for key, value in mapping.items():
+#                     try:
+#                         json_value = json.dumps(value)
+#                         pipeline.set(key, json_value, ex=expiry)
+#                     except Exception as e:
+#                         logger.error(f"序列化 {key} 失敗: {str(e)}")
+#                         continue
+#                 
+#                 pipeline.execute()
+#             else:
+#                 # 異步 Redis 客戶端
+#                 pipeline = redis.pipeline()
+#                 
+#                 for key, value in mapping.items():
+#                     try:
+#                         json_value = json.dumps(value)
+#                         pipeline.set(key, json_value, ex=expiry)
+#                     except Exception as e:
+#                         logger.error(f"序列化 {key} 失敗: {str(e)}")
+#                         continue
+#                 
+#                 await pipeline.execute()
+#             
 #             return True
 #         except Exception as e:
 #             logger.error(f"批量設置快取失敗: {str(e)}")
@@ -258,11 +290,11 @@
 
 # app/services/cache_service.py
 
-import aioredis
 import json
 import logging
 from typing import Dict, Any, List, Optional, Union
 from app.core.config import settings
+import asyncio
 
 logger = logging.getLogger(__name__)
 
@@ -276,18 +308,27 @@ class CacheService:
         self.redis_url = settings.REDIS_URL
         logger.info(f"Redis 快取服務初始化，URL: {self.redis_url}")
 
-    async def get_redis(self) -> aioredis.Redis:
+    async def get_redis(self):
         """
         獲取或創建 Redis 連接
         """
         if self.redis is None:
             try:
-                logger.info(f"建立 Redis 連接: {self.redis_url}")
-                self.redis = await aioredis.from_url(
-                    self.redis_url,
-                    decode_responses=True  # 自動解碼響應
+                # 使用 redis 庫的異步客戶端
+                logger.info("使用 redis 異步客戶端")
+                import redis.asyncio as redis
+                # 解析 Redis URL
+                from urllib.parse import urlparse
+                parsed = urlparse(self.redis_url)
+                self.redis = redis.Redis(
+                    host=parsed.hostname or 'localhost',
+                    port=parsed.port or 6379,
+                    db=int(parsed.path[1:]) if parsed.path and len(parsed.path) > 1 else 0,
+                    decode_responses=True
                 )
-                logger.info("Redis 連接成功")
+                # 測試連接
+                await self.redis.ping()
+                logger.info("Redis 異步連接成功")
             except Exception as e:
                 logger.error(f"Redis 連接失敗: {str(e)}")
                 # 建立連接失敗時，返回一個模擬的 Redis 實例，避免應用崩潰
@@ -338,6 +379,7 @@ class CacheService:
         try:
             redis = await self.get_redis()
             value = await redis.get(key)
+            
             if value:
                 return json.loads(value)
             return None
@@ -362,6 +404,9 @@ class CacheService:
         except Exception as e:
             logger.error(f"刪除快取失敗 ({key}): {str(e)}")
             return False
+        
+    async def delete_sync(self, key: str):
+        return await self._redis.delete(key)
     
     async def exists(self, key: str) -> bool:
         """
@@ -375,7 +420,8 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
-            return await redis.exists(key) > 0
+            
+            return bool(await redis.exists(key))
         except Exception as e:
             logger.error(f"檢查快取是否存在失敗 ({key}): {str(e)}")
             return False
@@ -395,11 +441,9 @@ class CacheService:
             
         try:
             redis = await self.get_redis()
-            
-            # 使用 mget 批量獲取
             values = await redis.mget(keys)
-            result = {}
             
+            result = {}
             for i, value in enumerate(values):
                 if value is not None:
                     try:
@@ -435,17 +479,35 @@ class CacheService:
             
         try:
             redis = await self.get_redis()
-            pipeline = redis.pipeline()
             
-            for key, value in mapping.items():
-                try:
-                    json_value = json.dumps(value)
-                    pipeline.set(key, json_value, ex=expiry)
-                except Exception as e:
-                    logger.error(f"序列化 {key} 失敗: {str(e)}")
-                    continue
+            # 檢查是否為同步 Redis 客戶端
+            if hasattr(redis, 'pipeline') and not asyncio.iscoroutinefunction(redis.pipeline):
+                # 同步 Redis 客戶端
+                pipeline = redis.pipeline()
+                
+                for key, value in mapping.items():
+                    try:
+                        json_value = json.dumps(value)
+                        pipeline.set(key, json_value, ex=expiry)
+                    except Exception as e:
+                        logger.error(f"序列化 {key} 失敗: {str(e)}")
+                        continue
+                
+                pipeline.execute()
+            else:
+                # 異步 Redis 客戶端
+                pipeline = redis.pipeline()
+                
+                for key, value in mapping.items():
+                    try:
+                        json_value = json.dumps(value)
+                        pipeline.set(key, json_value, ex=expiry)
+                    except Exception as e:
+                        logger.error(f"序列化 {key} 失敗: {str(e)}")
+                        continue
+                
+                await pipeline.execute()
             
-            await pipeline.execute()
             return True
         except Exception as e:
             logger.error(f"批量設置快取失敗: {str(e)}")
@@ -468,6 +530,7 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
+            
             return await redis.keys(pattern)
         except Exception as e:
             logger.error(f"獲取鍵模式失敗 (pattern={pattern}): {str(e)}")
@@ -477,7 +540,7 @@ class CacheService:
     
     async def add_to_list(self, key: str, value: str) -> bool:
         """
-        將值添加到列表末尾
+        向列表添加元素
         
         Args:
             key: 列表鍵
@@ -491,7 +554,7 @@ class CacheService:
             await redis.rpush(key, value)
             return True
         except Exception as e:
-            logger.error(f"添加到列表失敗 (key={key}, value={value}): {str(e)}")
+            logger.error(f"向列表添加元素失敗 (key={key}, value={value}): {str(e)}")
             return False
     
     async def remove_list_item(self, key: str, value: str) -> bool:
@@ -507,7 +570,9 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
+            
             await redis.lrem(key, 1, value)
+            
             return True
         except Exception as e:
             logger.error(f"從列表移除失敗 (key={key}, value={value}): {str(e)}")
@@ -527,6 +592,7 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
+            
             return await redis.lrange(key, start, end)
         except Exception as e:
             logger.error(f"獲取列表元素失敗 (key={key}): {str(e)}")
@@ -544,6 +610,7 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
+            
             return await redis.llen(key)
         except Exception as e:
             logger.error(f"獲取列表長度失敗 (key={key}): {str(e)}")
@@ -564,12 +631,11 @@ class CacheService:
         try:
             redis = await self.get_redis()
             
-            # 使用 pipeline 確保原子性
             pipe = redis.pipeline()
             pipe.lrem(source_key, 1, value)
             pipe.rpush(dest_key, value)
-            
             await pipe.execute()
+            
             return True
         except Exception as e:
             logger.error(f"移動列表項目失敗 (from={source_key}, to={dest_key}, value={value}): {str(e)}")
@@ -577,8 +643,17 @@ class CacheService:
             # 嘗試分步驟執行
             try:
                 redis = await self.get_redis()
-                await redis.lrem(source_key, 1, value)
-                await redis.rpush(dest_key, value)
+                
+                # 檢查是否為同步 Redis 客戶端
+                if hasattr(redis, 'lrem') and not asyncio.iscoroutinefunction(redis.lrem):
+                    # 同步 Redis 客戶端
+                    redis.lrem(source_key, 1, value)
+                    redis.rpush(dest_key, value)
+                else:
+                    # 異步 Redis 客戶端
+                    await redis.lrem(source_key, 1, value)
+                    await redis.rpush(dest_key, value)
+                
                 return True
             except Exception as inner_e:
                 logger.error(f"分步移動列表項目失敗: {inner_e}")
@@ -596,6 +671,7 @@ class CacheService:
         """
         try:
             redis = await self.get_redis()
+            
             return await redis.lpop(key)
         except Exception as e:
             logger.error(f"彈出列表元素失敗 (key={key}): {str(e)}")
@@ -623,10 +699,17 @@ class MockRedis:
         logger.warning("使用模擬 Redis 存儲 (僅用於開發/測試)")
     
     async def set(self, key, value, ex=None):
-        self.store[key] = value
+        # 確保存儲的是JSON字符串，與真實Redis保持一致
+        if isinstance(value, str):
+            # 如果已經是字符串，直接存儲
+            self.store[key] = value
+        else:
+            # 如果是其他類型，轉換為JSON字符串
+            self.store[key] = json.dumps(value)
         return True
     
     async def get(self, key):
+        # 返回原始字符串，讓CacheService的get方法進行JSON解析
         return self.store.get(key)
     
     async def delete(self, key):

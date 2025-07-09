@@ -191,6 +191,7 @@ class SolscanClient:
         all_activities = []
         current_time = int(time.time())
         from_time = current_time - (days_limit * 86400)  # 往前 days_limit 天
+        max_pages = 50  # 最大頁數限制
         
         logger.info(f"獲取 {address} 在 {days_limit} 天內的活動記錄 (從 {datetime.fromtimestamp(from_time)} 到 {datetime.fromtimestamp(current_time)})")
         
@@ -199,7 +200,7 @@ class SolscanClient:
             page = 1
             has_more_data = True
             
-            while has_more_data:
+            while has_more_data and page <= max_pages:
                 logger.info(f"獲取第 {page} 頁活動數據，地址: {address}")
                 
                 # 構建查詢參數，包含時間範圍
@@ -243,8 +244,12 @@ class SolscanClient:
                                     all_activities.extend(processed_activities)
                                     page += 1
                                     
+                                    # 檢查是否達到最大頁數限制
+                                    if page > max_pages:
+                                        logger.info(f"已達到最大頁數限制 ({max_pages} 頁)，停止獲取更多數據")
+                                        has_more_data = False
                                     # 如果返回的數據量少於一頁，說明已經到達最後一頁
-                                    if len(activities) < 100:
+                                    elif len(activities) < 100:
                                         has_more_data = False
                             else:
                                 error_text = await response.text()
