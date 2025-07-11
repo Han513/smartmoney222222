@@ -397,18 +397,21 @@ class MessageProcessor:
 
     def __init__(self):
         self.running = False
-        self.task = None
+        self.tasks = []  # 改為多個任務
         self.cache_key_prefix = "kafka_msg:"
         self.message_queue_key = "kafka_message_queue"
         self.processing_queue_key = "kafka_processing_queue"
         self.max_retries = 3
-        self.batch_size = 5  # 減少批次大小，提高處理速度
-        self.processing_interval = 0.5  # 減少處理間隔，更快處理消息
+        self.batch_size = 20  # 增加批次大小，從5增加到20
+        self.base_batch_size = 20  # 基礎批次大小
+        self.max_batch_size = 100  # 增加最大批次大小到100
+        self.processing_interval = 0.05  # 進一步減少處理間隔到0.05秒
+        self.worker_count = 3  # 並行處理器數量
         self.error_backoff = {
-            0: 5,    # 首次錯誤等待5秒
-            1: 30,   # 第二次錯誤等待30秒
-            2: 300,  # 第三次錯誤等待5分鐘
-            3: 1800  # 更多錯誤等待30分鐘
+            0: 1,    # 首次錯誤等待1秒
+            1: 5,    # 第二次錯誤等待5秒
+            2: 15,   # 第三次錯誤等待15秒
+            3: 60    # 更多錯誤等待1分鐘
         }
 
     async def start(self):
@@ -418,9 +421,24 @@ class MessageProcessor:
             return
 
         logger.info("啟動消息處理器")
+        
+        # 清除舊的處理隊列數據
+        try:
+            logger.info("清除舊的消息處理隊列數據...")
+            await self._clear_old_processing_data()
+            logger.info("舊的消息處理隊列數據已清除")
+        except Exception as e:
+            logger.warning(f"清除舊處理數據時發生錯誤: {e}")
+        
         self.running = True
-        self.task = asyncio.create_task(self._process_messages_loop())
-        logger.info("消息處理器已啟動")
+        
+        # 啟動多個並行處理任務
+        for i in range(self.worker_count):
+            task = asyncio.create_task(self._process_messages_loop(worker_id=i))
+            self.tasks.append(task)
+            logger.info(f"啟動處理器工作線程 {i+1}/{self.worker_count}")
+        
+        logger.info(f"消息處理器已啟動，共 {self.worker_count} 個並行處理器")
 
     async def stop(self):
         """停止消息處理器"""
@@ -430,22 +448,45 @@ class MessageProcessor:
         logger.info("停止消息處理器")
         self.running = False
 
-        if self.task:
-            self.task.cancel()
+        # 停止所有處理任務
+        for task in self.tasks:
+            task.cancel()
+        
+        # 等待所有任務完成
+        for task in self.tasks:
             try:
-                await self.task
+                await task
             except asyncio.CancelledError:
                 pass
-
+        
+        self.tasks.clear()
         logger.info("消息處理器已停止")
 
-    async def _process_messages_loop(self):
+    async def _process_messages_loop(self, worker_id: int = 0):
         """消息處理主循環"""
         try:
-            logger.info("開始處理消息隊列")
+            logger.info(f"工作線程 {worker_id} 開始處理消息隊列")
 
             while self.running:
                 try:
+                    # 動態調整批次大小 - 根據隊列長度調整
+                    queue_length = await cache_service.get_list_length(self.message_queue_key)
+                    if queue_length > 500:
+                        # 隊列嚴重積壓，使用最大批次大小
+                        self.batch_size = self.max_batch_size
+                    elif queue_length > 200:
+                        # 隊列積壓嚴重，增加批次大小
+                        self.batch_size = min(self.max_batch_size, self.base_batch_size * 3)
+                    elif queue_length > 100:
+                        # 隊列中等積壓，適度增加批次大小
+                        self.batch_size = min(self.max_batch_size, self.base_batch_size * 2)
+                    elif queue_length > 50:
+                        # 隊列輕微積壓，適度增加批次大小
+                        self.batch_size = min(self.max_batch_size, int(self.base_batch_size * 1.5))
+                    else:
+                        # 隊列正常，使用基礎批次大小
+                        self.batch_size = self.base_batch_size
+                    
                     # 獲取隊列中的消息批次
                     message_ids = await cache_service.get_list_items(
                         self.message_queue_key,
@@ -458,7 +499,7 @@ class MessageProcessor:
                         await asyncio.sleep(self.processing_interval)
                         continue
 
-                    logger.info(f"從隊列獲取 {len(message_ids)} 條消息")
+                    logger.info(f"工作線程 {worker_id} 從隊列獲取 {len(message_ids)} 條消息")
 
                     # 處理批次中的每個消息
                     for msg_id in message_ids:
@@ -473,7 +514,7 @@ class MessageProcessor:
                         message = await cache_service.get(f"{self.cache_key_prefix}{msg_id}")
 
                         if not message:
-                            # logger.warning(f"消息 {msg_id} 不存在或已過期")
+                            logger.warning(f"消息 {msg_id} 不存在或已過期")
                             await cache_service.remove_list_item(self.processing_queue_key, msg_id)
                             continue
 
@@ -489,7 +530,7 @@ class MessageProcessor:
                             await cache_service.set(
                                 f"{self.cache_key_prefix}{msg_id}",
                                 message,
-                                expiry=24 * 3600  # 保留24小時
+                                expiry=7 * 24 * 3600  # 保留7天
                             )
                         else:
                             # 處理失敗，根據重試次數決定下一步
@@ -520,11 +561,11 @@ class MessageProcessor:
                             await cache_service.set(
                                 f"{self.cache_key_prefix}{msg_id}",
                                 message,
-                                expiry=24 * 3600  # 24小時過期
+                                expiry=7 * 24 * 3600
                             )
 
                     # 批次處理完成後，短暫休息
-                    await asyncio.sleep(0.1)
+                    await asyncio.sleep(0.02)  # 進一步減少休息時間到0.02秒
 
                 except asyncio.CancelledError:
                     raise
@@ -536,11 +577,11 @@ class MessageProcessor:
             logger.info("消息處理循環被取消")
             raise
         except Exception as e:
-            logger.exception(f"消息處理循環發生未預期的錯誤: {e}")
+            logger.exception(f"工作線程 {worker_id} 消息處理循環發生未預期的錯誤: {e}")
             if self.running:
                 # 嘗試重啟處理循環
                 await asyncio.sleep(5)
-                self.task = asyncio.create_task(self._process_messages_loop())
+                # 注意：這裡不應該重新創建任務，因為任務管理已經在start方法中處理
 
     async def _process_message(self, message_id: str, message: Dict[str, Any]) -> bool:
         """處理單個消息"""
@@ -561,13 +602,6 @@ class MessageProcessor:
             price = float(event["price"])
             amount = float(event["txnValue"])
             timestamp = int(event["timestamp"])
-            
-            # 檢查是否已經處理過這個交易（基於signature去重）
-            processed_key = f"processed_transaction:{txn_hash}"
-            existing_processed = await cache_service.get(processed_key)
-            if existing_processed:
-                logger.info(f"跳過已處理的交易: {txn_hash}")
-                return True
             
             # 檢查並修正timestamp (如果是毫秒格式轉換為秒)
             if timestamp > 10**12:  # 判斷是否為毫秒時間戳 (13位數)
@@ -621,20 +655,11 @@ class MessageProcessor:
                 "value": price * amount
             }
 
-            # 使用 transaction_processor 保存交易
             save_result = await transaction_processor.save_transaction(transaction_data)
 
             if save_result:
                 logger.info(f"成功保存交易: {txn_hash}")
 
-                # 標記交易為已處理
-                await cache_service.set(
-                    processed_key,
-                    {"processed_at": int(time.time())},
-                    expiry=3600  # 1小時過期
-                )
-
-                # 更新 WalletTokenState 緩存
                 transaction_processor._update_wallet_token_state_after_transaction(
                     wallet_address, token_address, transaction_type,
                     amount, price * amount, price, timestamp
@@ -642,7 +667,7 @@ class MessageProcessor:
 
                 await wallet_summary_service.increment_transaction_counts(
                     wallet_address,
-                    transaction_type,  # 使用新的交易類型
+                    transaction_type,
                     timestamp
                 )
 
@@ -676,6 +701,32 @@ class MessageProcessor:
 
         except Exception as e:
             logger.error(f"重新加入消息 {message_id} 到隊列時發生錯誤: {e}")
+
+    async def _clear_old_processing_data(self):
+        """清除舊的處理隊列數據"""
+        try:
+            # 獲取所有處理中的消息ID
+            processing_messages = await cache_service.get_list_items(self.processing_queue_key)
+            if not processing_messages:
+                return
+
+            logger.info(f"發現 {len(processing_messages)} 條舊的處理中消息，將其移除...")
+            for msg_id in processing_messages:
+                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                logger.info(f"移除處理中消息: {msg_id}")
+
+            # 獲取所有待處理的消息ID
+            message_queue_messages = await cache_service.get_list_items(self.message_queue_key)
+            if not message_queue_messages:
+                return
+
+            logger.info(f"發現 {len(message_queue_messages)} 條舊的待處理消息，將其移除...")
+            for msg_id in message_queue_messages:
+                await cache_service.remove_list_item(self.message_queue_key, msg_id)
+                logger.info(f"移除待處理消息: {msg_id}")
+
+        except Exception as e:
+            logger.error(f"清除舊處理數據時發生錯誤: {e}")
 
 # 創建全局實例
 message_processor = MessageProcessor()

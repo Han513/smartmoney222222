@@ -4,13 +4,13 @@ import time
 import json
 import asyncio
 import logging
-from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Request, FastAPI
+from fastapi import APIRouter, BackgroundTasks, HTTPException, Depends, Query, Request
 from fastapi.responses import JSONResponse
 from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from app.services.wallet_analyzer import WalletAnalyzer
 from app.services.cache_service import CacheService
-from app.workers.kafka_producer import wallet_analysis_producer
+from app.workers.tasks import process_wallet_batch
 from app.core.config import settings
 from app.services.solscan import solscan_client
 # from app.services.kafka_consumer import kafka_consumer
@@ -18,8 +18,7 @@ from decimal import Decimal
 from datetime import datetime, timezone
 import httpx
 import dotenv
-import random
-from contextlib import asynccontextmanager
+
 logger = logging.getLogger(__name__)
 # logger.setLevel(logging.WARNING)
 
@@ -31,8 +30,6 @@ wallet_analyzer = WalletAnalyzer()
 
 SMARTMONEY_BSC = os.getenv("SMARTMONEY_BSC", "http://127.0.0.1:5000/robots/smartmoney/webhook/update-addresses/BSC")
 
-ACTIVE_TASKS_SET = "analyze:active_tasks"
-
 # 請求與響應模型
 class WalletAnalysisRequest(BaseModel):
     addresses: List[str]
@@ -42,7 +39,6 @@ class WalletAnalysisRequest(BaseModel):
     type: str = "add"
     twitter_names: Optional[List[str]] = None  # 修改為 twitter_names
     twitter_usernames: Optional[List[str]] = None  # 修改為 twitter_usernames
-    is_smart_wallet: Optional[bool] = False  # 新增 is_smart_wallet 參數
 
 class WalletMetrics(BaseModel):
     address: str
@@ -80,165 +76,6 @@ class TokenAnalysisResponse(BaseModel):
     total_sell_count: str
     realized_pnl: str
     total_holding_seconds: int
-
-def mock_call_external_analyze_api(addresses, **kwargs):
-    """模擬呼叫外部分析API，回傳一個隨機task_id"""
-    return f"mock-task-{uuid.uuid4()}"
-
-async def mock_call_external_progress_api(task_id):
-    """模擬查詢外部分析進度，隨機進度，task_id結尾為1時直接100%"""
-    # 你可以根據實際需求調整這裡的進度模擬
-    if task_id.endswith('1'):
-        return 1.0
-    return round(random.uniform(0.1, 0.95), 2)
-
-async def add_active_task(task_id: str):
-    """將任務ID加入active_tasks set"""
-    redis = await cache_service.get_redis()
-    await redis.sadd(ACTIVE_TASKS_SET, task_id)
-
-async def remove_active_task(task_id: str):
-    """將任務ID從active_tasks set移除"""
-    redis = await cache_service.get_redis()
-    await redis.srem(ACTIVE_TASKS_SET, task_id)
-
-async def get_active_tasks():
-    """獲取所有進行中任務ID"""
-    redis = await cache_service.get_redis()
-    return await redis.smembers(ACTIVE_TASKS_SET)
-
-async def do_post_analysis(task_id: str):
-    """進度=1時自動查詢交易紀錄並寫入 ready_results"""
-    logger = logging.getLogger(__name__)
-    req_status = await cache_service.get(f"req:{task_id}")
-    if not req_status:
-        return
-    addresses = req_status.get("pending_addresses", [])
-    chain = req_status.get("chain", "SOLANA")
-    
-    from app.models.models import Transaction
-    from sqlalchemy.future import select
-    from app.core.db import async_session
-    from app.services.metrics_calculator import MetricsCalculator
-    from app.services.transaction_processor import transaction_processor
-    
-    ready_results = {}
-    metrics_calculator = MetricsCalculator()
-    
-    async with async_session() as session:
-        for addr in addresses:
-            try:
-                logger.info(f"開始處理錢包 {addr} 的統計分析")
-                
-                # 查詢該錢包的所有交易記錄
-                result = await session.execute(
-                    select(Transaction).where(Transaction.wallet_address == addr)
-                    .order_by(Transaction.transaction_time.desc())
-                )
-                txs = result.scalars().all()
-                
-                if not txs:
-                    logger.info(f"錢包 {addr} 沒有交易記錄")
-                    ready_results[addr] = {
-                        "address": addr,
-                        "metrics": {"transaction_count": 0},
-                        "last_updated": int(time.time())
-                    }
-                    continue
-                
-                # 將交易記錄轉換為活動格式
-                activities = []
-                for tx in txs:
-                    activity = {
-                        "block_time": tx.transaction_time,
-                        "signature": tx.signature,
-                        "token_address": tx.token_address,
-                        "token_name": tx.token_name,
-                        "amount": tx.amount,
-                        "value": tx.value,
-                        "price": tx.price,
-                        "transaction_type": tx.transaction_type,
-                        "from_token_address": tx.from_token_address,
-                        "from_token_symbol": tx.from_token_symbol,
-                        "from_token_amount": tx.from_token_amount,
-                        "dest_token_address": tx.dest_token_address,
-                        "dest_token_symbol": tx.dest_token_symbol,
-                        "dest_token_amount": tx.dest_token_amount,
-                        "realized_profit": tx.realized_profit,
-                        "realized_profit_percentage": tx.realized_profit_percentage
-                    }
-                    activities.append(activity)
-                
-                # 計算代幣統計
-                logger.info(f"計算錢包 {addr} 的代幣統計")
-                token_stats = metrics_calculator.calculate_token_stats(activities)
-                
-                # 計算勝率
-                logger.info(f"計算錢包 {addr} 的勝率")
-                win_rate_metrics = metrics_calculator.calculate_win_rate(token_stats["tokens"])
-                
-                # 更新持倉記錄到 Holding 表
-                logger.info(f"更新錢包 {addr} 的持倉記錄")
-                holding_update_result = await transaction_processor.update_wallet_holdings(addr, token_stats)
-                logger.info(f"錢包 {addr} 持倉記錄更新結果: {holding_update_result}")
-                
-                # 更新錢包摘要
-                logger.info(f"更新錢包 {addr} 的摘要資訊")
-                # 從 req_status 中獲取 Twitter 信息，如果沒有則使用默認值
-                twitter_name = req_status.get("twitter_names", {}).get(addr) if req_status.get("twitter_names") else None
-                twitter_username = req_status.get("twitter_usernames", {}).get(addr) if req_status.get("twitter_usernames") else None
-                is_smart_wallet = req_status.get("is_smart_wallet", False)
-                
-                await transaction_processor.update_wallet_summary(
-                    wallet_address=addr,
-                    twitter_name=twitter_name,
-                    twitter_username=twitter_username,
-                    is_smart_wallet=is_smart_wallet
-                )
-                
-                # 準備返回結果
-                ready_results[addr] = {
-                    "address": addr,
-                    "metrics": {
-                        "transaction_count": len(txs),
-                        "token_stats": token_stats,
-                        "win_rate": win_rate_metrics,
-                        "last_transaction_time": activities[0]["block_time"] if activities else None,
-                        "first_transaction_time": activities[-1]["block_time"] if activities else None
-                    },
-                    "last_updated": int(time.time())
-                }
-                
-                logger.info(f"錢包 {addr} 統計分析完成")
-                
-            except Exception as e:
-                logger.exception(f"處理錢包 {addr} 時發生錯誤: {str(e)}")
-                ready_results[addr] = {
-                    "address": addr,
-                    "metrics": {"transaction_count": 0, "error": str(e)},
-                    "last_updated": int(time.time())
-                }
-    
-    req_status["ready_results"] = ready_results
-    req_status["pending_addresses"] = []
-    await cache_service.set(f"req:{task_id}", req_status, expiry=3600)
-    logger.info(f"任務 {task_id} 的後處理分析完成")
-
-async def poll_active_tasks():
-    """定時輪詢active_tasks，進度=1時自動處理並移除"""
-    while True:
-        try:
-            task_ids = await get_active_tasks()
-            for task_id in list(task_ids):
-                progress = await mock_call_external_progress_api(task_id)
-                if progress == 1.0:
-                    await do_post_analysis(task_id)
-                    await remove_active_task(task_id)
-                    await cache_service.delete(f"req:{task_id}")
-        except Exception as e:
-            logger = logging.getLogger(__name__)
-            logger.error(f"active_tasks 輪詢異常: {e}")
-        await asyncio.sleep(10)
 
 @router.post("/analyze", response_model=WalletBatchResponse)
 async def analyze_wallets(
@@ -486,35 +323,63 @@ async def check_analysis_status(
     request_id: str
 ):
     """
-    檢查批量分析狀態端點（新流程：查外部API進度，進度=1時查本地交易紀錄並統計）
+    檢查批量分析狀態端點
     """
     logger = logging.getLogger(__name__)
-    logger.info(f"[新流程] Checking status for request: {request_id}")
-    # 查快取取得地址
+    logger.info(f"Checking status for request: {request_id}")
+    
+    # 從快取獲取請求狀態
     req_status = await cache_service.get(f"req:{request_id}")
+    
     if not req_status:
         logger.warning(f"Request ID {request_id} not found in cache")
         raise HTTPException(status_code=404, detail=f"Request ID {request_id} not found")
-    addresses = req_status.get("pending_addresses", [])
-    # 查外部API進度
-    progress = await mock_call_external_progress_api(request_id)
-    logger.info(f"[新流程] 外部API進度: {progress}")
-    if progress < 1.0:
-        return BatchResultResponse(
-            request_id=request_id,
-            status="processing",
-            progress=progress,
-            ready_results={},
-            pending_addresses=addresses
-        )
-    # 進度=1，直接返回已處理的結果
-    ready_results = req_status.get("ready_results", {})
+    
+    logger.info(f"Found request status: {len(req_status.get('pending_addresses', []))} pending, {len(req_status.get('ready_results', {}))} ready")
+    
+    # 計算完成進度
+    total = len(req_status["pending_addresses"]) + len(req_status["ready_results"])
+    completed = len(req_status["ready_results"])
+    progress = completed / total if total > 0 else 1.0
+    
+    # 確定狀態
+    status = "completed" if progress >= 1.0 else "processing"
+    logger.info(f"Status: {status}, Progress: {progress:.2f}")
+    
+    # 獲取最新結果
+    updated_results = {}
+    pending_addresses = req_status["pending_addresses"].copy()
+    new_pending = []
+    
+    for address in pending_addresses:
+        try:
+            result = await cache_service.get(f"wallet:{address}")
+            if result:
+                logger.info(f"Found new result for {address}")
+                updated_results[address] = WalletMetrics(
+                    address=address,
+                    metrics=result,
+                    last_updated=int(time.time())
+                )
+            else:
+                logger.info(f"No result yet for {address}")
+                new_pending.append(address)
+        except Exception as e:
+            logger.error(f"Error checking result for {address}: {str(e)}")
+            new_pending.append(address)
+    
+    # 合併已有結果
+    for addr, data in req_status["ready_results"].items():
+        if addr not in updated_results:
+            updated_results[addr] = data
+    
+    logger.info(f"Returning response with {len(updated_results)} results and {len(new_pending)} pending addresses")
     return BatchResultResponse(
         request_id=request_id,
-        status="completed",
-        progress=1.0,
-        ready_results=ready_results,
-        pending_addresses=[]
+        status=status,
+        progress=progress,
+        ready_results=updated_results,
+        pending_addresses=new_pending
     )
 
 # 獲取單個錢包分析
@@ -700,22 +565,28 @@ async def analyze_kol_wallets(
     if request.type == "remove":
         logger.info(f"執行移除操作，將刪除 {len(unique_addresses)} 個錢包地址的數據")
         
+        # 创建后台任务执行删除操作
         async def remove_wallet_data():
             try:
-                # 分批刪除，避免一次性操作過多數據
+                from app.workers.tasks import remove_wallet_data_batch
+                
+                # 分批删除，避免一次性操作过多数据
                 batch_size = 20
                 address_groups = [unique_addresses[i:i+batch_size] 
                                 for i in range(0, len(unique_addresses), batch_size)]
+                
                 for batch_idx, address_batch in enumerate(address_groups):
                     logger.info(f"提交第 {batch_idx+1}/{len(address_groups)} 批刪除任務 ({len(address_batch)} 個地址)")
-                    await wallet_analysis_producer.send_remove_wallet_data_task(
-                        request_id=request_id,
+                    
+                    remove_wallet_data_batch.delay(
                         addresses=address_batch,
-                        batch_index=batch_idx,
-                        chain=chain
+                        chain=chain,
+                        request_id=request_id
                     )
+                    
                     if batch_idx < len(address_groups) - 1:
                         await asyncio.sleep(0.1)
+                
                 logger.info(f"所有 {len(unique_addresses)} 個地址的刪除任務已提交")
             except Exception as e:
                 logger.exception(f"提交刪除任務失敗: {str(e)}")
@@ -731,8 +602,10 @@ async def analyze_kol_wallets(
             "chain": chain
         }
         
+        # 保存请求状态到缓存
         await cache_service.set(f"req:{request_id}", req_status, expiry=3600)
         
+        # 立即返回结果
         return WalletBatchResponse(
             request_id=request_id,
             ready_results={},
@@ -797,78 +670,71 @@ async def analyze_kol_wallets(
     # 将所有待处理地址汇总
     all_pending = in_progress_addresses + addresses_to_analyze
     
-    # 添加調試日誌
-    logger.info(f"=== 調試信息 ===")
-    logger.info(f"unique_addresses: {unique_addresses}")
-    logger.info(f"cached_results keys: {list(cached_results.keys())}")
-    logger.info(f"in_progress_addresses: {in_progress_addresses}")
-    logger.info(f"addresses_to_analyze: {addresses_to_analyze}")
-    logger.info(f"all_pending: {all_pending}")
-    logger.info(f"==================")
-    
     # 準備請求狀態
-    # 創建地址到 Twitter 信息的映射
-    twitter_names_map = {}
-    twitter_usernames_map = {}
-    if request.twitter_names and request.twitter_usernames:
-        for i, addr in enumerate(unique_addresses):
-            if i < len(request.twitter_names):
-                twitter_names_map[addr] = request.twitter_names[i]
-            if i < len(request.twitter_usernames):
-                twitter_usernames_map[addr] = request.twitter_usernames[i]
-    
     req_status = {
         "total_addresses": len(unique_addresses),
         "pending_addresses": all_pending,
         "ready_results": ready_results_serializable,
         "start_time": int(time.time()),
         "operation_type": "add",
-        "chain": chain,
-        "twitter_names": twitter_names_map,
-        "twitter_usernames": twitter_usernames_map,
-        "is_smart_wallet": request.is_smart_wallet
+        "chain": chain
     }
     
     # 保存請求狀態到緩存
     await cache_service.set(f"req:{request_id}", req_status, expiry=3600)  # 1小時過期
     
-    # 如果有地址需要分析，使用Kafka處理
+    # 如果有地址需要分析，使用Celery处理
     if addresses_to_analyze:
-        logger.info(f"有 {len(addresses_to_analyze)} 個地址需要分析，準備提交 Kafka 任務")
-        batch_size = 10
+        # 优化：决定如何分批
+        batch_size = 10  # 默认批次大小
         if len(addresses_to_analyze) > 100:
             batch_size = 20
         elif len(addresses_to_analyze) <= 20:
             batch_size = 5
+        
+        # 分批创建Celery任务
         address_groups = [addresses_to_analyze[i:i+batch_size] 
                          for i in range(0, len(addresses_to_analyze), batch_size)]
-        logger.info(f"創建 {len(address_groups)} 個Kafka批處理任務")
-        async def submit_kafka_tasks():
+        
+        logger.info(f"创建 {len(address_groups)} 个Celery批处理任务")
+        
+        # 异步提交Celery任务
+        async def submit_celery_tasks():
             try:
+                from app.workers.tasks import process_wallet_batch
+                
                 for batch_idx, address_batch in enumerate(address_groups):
-                    logger.info(f"提交第 {batch_idx+1}/{len(address_groups)} 批 ({len(address_batch)} 個地址)")
-                    await wallet_analysis_producer.send_wallet_batch_analysis_task(
-                        request_id=request_id,
-                        addresses=address_batch,
-                        time_range=request.time_range,
-                        include_metrics=request.include_metrics,
-                        batch_index=batch_idx,
-                        chain=chain,
-                        twitter_names=[twitter_names[request.addresses.index(addr)] for addr in address_batch],
-                        twitter_usernames=[twitter_usernames[request.addresses.index(addr)] for addr in address_batch],
-                        is_smart_wallet=request.is_smart_wallet
+                    logger.info(f"提交第 {batch_idx+1}/{len(address_groups)} 批 ({len(address_batch)} 个地址)")
+                    
+                    # 提交批处理任务到Celery
+                    process_wallet_batch.apply_async(
+                        kwargs={
+                            "request_id": request_id,
+                            "addresses": address_batch,
+                            "time_range": request.time_range,
+                            "include_metrics": request.include_metrics,
+                            "batch_index": batch_idx,
+                            "chain": chain,  # 添加链信息
+                            "twitter_names": [twitter_names[request.addresses.index(addr)] for addr in address_batch],
+                            "twitter_usernames": [twitter_usernames[request.addresses.index(addr)] for addr in address_batch]
+                        },
+                        queue="batch_processing"  # 明确指定队列
                     )
+                    
+                    # 简短等待，避免一次提交过多任务
                     if batch_idx < len(address_groups) - 1:
                         await asyncio.sleep(0.1)
-                logger.info(f"所有 {len(addresses_to_analyze)} 個地址已提交到Kafka")
+                
+                logger.info(f"所有 {len(addresses_to_analyze)} 个地址已提交到Celery")
             except Exception as e:
-                logger.exception(f"提交Kafka任務失敗: {str(e)}")
+                logger.exception(f"提交Celery任务失败: {str(e)}")
+                # 出错时清理处理中标记
                 async with wallet_analyzer._processing_lock:
                     for addr in addresses_to_analyze:
-                        await cache_service.delete(f"processing:{chain}:{addr}")
-        asyncio.create_task(submit_kafka_tasks())
-    else:
-        logger.info(f"沒有地址需要分析，跳過 Kafka 任務提交")
+                        await cache_service.delete(f"processing:{chain}:{addr}")  # 使用 delete 方法清理标记
+        
+        # 添加背景任务以提交Celery任务
+        background_tasks.add_task(submit_celery_tasks)
     
     # 立即返回結果
     return WalletBatchResponse(
@@ -919,11 +785,100 @@ async def raw_test(request: Request):
     
 @router.get("/ping")
 def ping():
-    """
-    簡單的測試端點，確認 API 服務器工作正常
-    """
-    print("Ping endpoint called")
-    return {"status": "ok", "message": "API is running"}
+    """簡單的測試端點"""
+    return {"status": "ok", "message": "pong"}
+
+@router.get("/kafka/heartbeat")
+async def kafka_heartbeat():
+    """檢查Kafka消費者狀態"""
+    try:
+        from app.services.kafka_consumer import kafka_consumer
+        from app.services.kafka_processor import message_processor
+        
+        # 檢查Kafka消費者狀態
+        kafka_status = {
+            "running": kafka_consumer.running,
+            "topic": kafka_consumer.topic,
+            "group_id": kafka_consumer.group_id,
+            "bootstrap_servers": kafka_consumer.bootstrap_servers
+        }
+        
+        # 檢查消息處理器狀態
+        processor_status = {
+            "running": message_processor.running,
+            "batch_size": message_processor.batch_size,
+            "processing_interval": message_processor.processing_interval,
+            "worker_count": message_processor.worker_count,
+            "active_tasks": len(message_processor.tasks)
+        }
+        
+        # 檢查Redis中的隊列狀態
+        try:
+            message_queue_length = await cache_service.get_list_length("kafka_message_queue")
+            processing_queue_length = await cache_service.get_list_length("kafka_processing_queue")
+            
+            queue_status = {
+                "message_queue_length": message_queue_length,
+                "processing_queue_length": processing_queue_length
+            }
+        except Exception as e:
+            queue_status = {
+                "error": f"無法獲取隊列狀態: {str(e)}"
+            }
+        
+        # 檢查最近的消息時間戳
+        try:
+            recent_messages = await cache_service.get_list_items("kafka_message_queue", 0, 4)
+            if recent_messages:
+                # 獲取最新的消息數據
+                latest_message = await cache_service.get(f"kafka_msg:{recent_messages[0]}")
+                if latest_message and "data" in latest_message:
+                    event_data = latest_message["data"]["event"]
+                    latest_timestamp = event_data.get("timestamp", 0)
+                    current_time = int(time.time())
+                    
+                    # 檢查時間戳單位並統一轉換為秒
+                    if latest_timestamp > 10**12:  # 判斷是否為毫秒時間戳 (13位數)
+                        latest_timestamp_seconds = latest_timestamp // 1000
+                        timestamp_unit = "milliseconds"
+                    else:
+                        latest_timestamp_seconds = latest_timestamp
+                        timestamp_unit = "seconds"
+                    
+                    time_diff = current_time - latest_timestamp_seconds
+                    
+                    message_status = {
+                        "latest_message_timestamp": latest_timestamp,
+                        "latest_message_timestamp_seconds": latest_timestamp_seconds,
+                        "current_time": current_time,
+                        "timestamp_unit": timestamp_unit,
+                        "time_difference_seconds": time_diff,
+                        "time_difference_minutes": time_diff / 60,
+                        "time_difference_hours": time_diff / 3600
+                    }
+                else:
+                    message_status = {"error": "無法獲取最新消息數據"}
+            else:
+                message_status = {"info": "沒有待處理的消息"}
+        except Exception as e:
+            message_status = {"error": f"無法獲取消息狀態: {str(e)}"}
+        
+        return {
+            "status": "healthy" if kafka_consumer.running and message_processor.running else "unhealthy",
+            "kafka_consumer": kafka_status,
+            "message_processor": processor_status,
+            "queue_status": queue_status,
+            "message_status": message_status,
+            "timestamp": int(time.time())
+        }
+        
+    except Exception as e:
+        logger.exception(f"檢查Kafka心跳時發生錯誤: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": int(time.time())
+        }
 
 @router.get("/test-solscan")
 async def test_solscan(address: str = "4t9bWuZsXXKGMgmd96nFD4KWxyPNTsPm4q9jEMH4jD2i"):
@@ -1004,14 +959,4 @@ async def startup_event():
     from app.services.wallet_token_analyzer import wallet_token_analyzer
     await wallet_token_analyzer.initialize()
     
-    # 啟動 active_tasks 輪詢任務
-    await start_active_tasks_poller()
-    
     logger.info("服務初始化完成")
-
-@router.on_event("startup")
-async def start_active_tasks_poller():
-    logger = logging.getLogger(__name__)
-    logger.info("啟動 active_tasks 輪詢任務...")
-    loop = asyncio.get_event_loop()
-    loop.create_task(poll_active_tasks())
