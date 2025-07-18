@@ -880,6 +880,76 @@ async def kafka_heartbeat():
             "timestamp": int(time.time())
         }
 
+@router.post("/kafka/clear-cache")
+async def clear_kafka_cache():
+    """清除Kafka相關的Redis緩存"""
+    try:
+        from app.services.kafka_consumer import kafka_consumer
+        from app.services.kafka_processor import message_processor
+        
+        logger.info("收到清除Kafka緩存請求")
+        
+        # 顯示清除前的狀態
+        message_queue_length_before = await cache_service.get_list_length("kafka_message_queue")
+        processing_queue_length_before = await cache_service.get_list_length("kafka_processing_queue")
+        
+        # 獲取Kafka緩存鍵數量
+        kafka_keys = await cache_service.keys_pattern("kafka_msg:*")
+        kafka_keys_count_before = len(kafka_keys)
+        
+        logger.info(f"清除前狀態 - 消息隊列: {message_queue_length_before}, 處理中隊列: {processing_queue_length_before}, Kafka緩存鍵: {kafka_keys_count_before}")
+        
+        # 清除消息隊列
+        await cache_service.delete("kafka_message_queue")
+        await cache_service.delete("kafka_processing_queue")
+        await cache_service.delete("smart_token_events_queue")
+        
+        # 清除所有Kafka緩存鍵
+        if kafka_keys:
+            batch_size = 100
+            for i in range(0, len(kafka_keys), batch_size):
+                batch = kafka_keys[i:i + batch_size]
+                for key in batch:
+                    await cache_service.delete(key)
+            logger.info(f"已清除 {len(kafka_keys)} 個Kafka緩存鍵")
+        
+        # 顯示清除後的狀態
+        message_queue_length_after = await cache_service.get_list_length("kafka_message_queue")
+        processing_queue_length_after = await cache_service.get_list_length("kafka_processing_queue")
+        kafka_keys_after = await cache_service.keys_pattern("kafka_msg:*")
+        kafka_keys_count_after = len(kafka_keys_after)
+        
+        logger.info(f"清除後狀態 - 消息隊列: {message_queue_length_after}, 處理中隊列: {processing_queue_length_after}, Kafka緩存鍵: {kafka_keys_count_after}")
+        
+        return {
+            "status": "success",
+            "message": "Kafka緩存清除完成",
+            "before": {
+                "message_queue_length": message_queue_length_before,
+                "processing_queue_length": processing_queue_length_before,
+                "kafka_cache_keys": kafka_keys_count_before
+            },
+            "after": {
+                "message_queue_length": message_queue_length_after,
+                "processing_queue_length": processing_queue_length_after,
+                "kafka_cache_keys": kafka_keys_count_after
+            },
+            "cleared": {
+                "message_queue_length": message_queue_length_before - message_queue_length_after,
+                "processing_queue_length": processing_queue_length_before - processing_queue_length_after,
+                "kafka_cache_keys": kafka_keys_count_before - kafka_keys_count_after
+            },
+            "timestamp": int(time.time())
+        }
+        
+    except Exception as e:
+        logger.exception(f"清除Kafka緩存時發生錯誤: {e}")
+        return {
+            "status": "error",
+            "error": str(e),
+            "timestamp": int(time.time())
+        }
+
 @router.get("/test-solscan")
 async def test_solscan(address: str = "4t9bWuZsXXKGMgmd96nFD4KWxyPNTsPm4q9jEMH4jD2i"):
     """

@@ -402,17 +402,21 @@ class MessageProcessor:
         self.message_queue_key = "kafka_message_queue"
         self.processing_queue_key = "kafka_processing_queue"
         self.max_retries = 3
-        self.batch_size = 20  # 增加批次大小，從5增加到20
-        self.base_batch_size = 20  # 基礎批次大小
-        self.max_batch_size = 100  # 增加最大批次大小到100
-        self.processing_interval = 0.05  # 進一步減少處理間隔到0.05秒
-        self.worker_count = 3  # 並行處理器數量
+        self.batch_size = 100  # 大幅增加批次大小到100
+        self.base_batch_size = 100  # 基礎批次大小
+        self.max_batch_size = 500  # 大幅增加最大批次大小到500
+        self.processing_interval = 0.001  # 極度減少處理間隔到0.001秒
+        self.worker_count = 10  # 大幅增加並行處理器數量到10
         self.error_backoff = {
             0: 1,    # 首次錯誤等待1秒
             1: 5,    # 第二次錯誤等待5秒
             2: 15,   # 第三次錯誤等待15秒
             3: 60    # 更多錯誤等待1分鐘
         }
+        
+        # 消息過期時間設置（秒）
+        self.message_expiry_seconds = 3600  # 1小時後的消息視為過期
+        self.skip_old_messages = True  # 是否跳過過期消息
 
     async def start(self):
         """啟動消息處理器"""
@@ -430,6 +434,15 @@ class MessageProcessor:
         except Exception as e:
             logger.warning(f"清除舊處理數據時發生錯誤: {e}")
         
+        # 清除過期消息
+        if self.skip_old_messages:
+            try:
+                logger.info("清除過期消息...")
+                expired_count = await self._clear_expired_messages()
+                logger.info(f"已清除 {expired_count} 條過期消息")
+            except Exception as e:
+                logger.warning(f"清除過期消息時發生錯誤: {e}")
+        
         self.running = True
         
         # 啟動多個並行處理任務
@@ -437,6 +450,12 @@ class MessageProcessor:
             task = asyncio.create_task(self._process_messages_loop(worker_id=i))
             self.tasks.append(task)
             logger.info(f"啟動處理器工作線程 {i+1}/{self.worker_count}")
+        
+        # 啟動定期清理過期消息的任務
+        if self.skip_old_messages:
+            cleanup_task = asyncio.create_task(self._periodic_cleanup_expired_messages())
+            self.tasks.append(cleanup_task)
+            logger.info("啟動定期清理過期消息任務")
         
         logger.info(f"消息處理器已啟動，共 {self.worker_count} 個並行處理器")
 
@@ -469,23 +488,36 @@ class MessageProcessor:
 
             while self.running:
                 try:
-                    # 動態調整批次大小 - 根據隊列長度調整
+                    # 動態調整批次大小 - 根據隊列長度調整（更激進的策略）
                     queue_length = await cache_service.get_list_length(self.message_queue_key)
-                    if queue_length > 500:
+                    if queue_length > 5000:
+                        # 隊列極度積壓，使用最大批次大小，無延遲處理
+                        self.batch_size = self.max_batch_size
+                        current_interval = 0.0001  # 0.0001秒，幾乎無延遲
+                    elif queue_length > 2000:
+                        # 隊列極度積壓，使用最大批次大小
+                        self.batch_size = self.max_batch_size
+                        current_interval = 0.0005  # 0.0005秒
+                    elif queue_length > 1000:
                         # 隊列嚴重積壓，使用最大批次大小
                         self.batch_size = self.max_batch_size
+                        current_interval = 0.001  # 0.001秒
+                    elif queue_length > 500:
+                        # 隊列積壓嚴重，使用最大批次大小
+                        self.batch_size = self.max_batch_size
+                        current_interval = 0.002  # 0.002秒
                     elif queue_length > 200:
-                        # 隊列積壓嚴重，增加批次大小
+                        # 隊列中等積壓，增加批次大小
                         self.batch_size = min(self.max_batch_size, self.base_batch_size * 3)
+                        current_interval = 0.005  # 0.005秒
                     elif queue_length > 100:
-                        # 隊列中等積壓，適度增加批次大小
-                        self.batch_size = min(self.max_batch_size, self.base_batch_size * 2)
-                    elif queue_length > 50:
                         # 隊列輕微積壓，適度增加批次大小
-                        self.batch_size = min(self.max_batch_size, int(self.base_batch_size * 1.5))
+                        self.batch_size = min(self.max_batch_size, self.base_batch_size * 2)
+                        current_interval = 0.01  # 0.01秒
                     else:
                         # 隊列正常，使用基礎批次大小
                         self.batch_size = self.base_batch_size
+                        current_interval = self.processing_interval
                     
                     # 獲取隊列中的消息批次
                     message_ids = await cache_service.get_list_items(
@@ -496,76 +528,26 @@ class MessageProcessor:
 
                     if not message_ids:
                         # 隊列為空，等待一段時間後再檢查
-                        await asyncio.sleep(self.processing_interval)
+                        await asyncio.sleep(current_interval)
                         continue
 
-                    logger.info(f"工作線程 {worker_id} 從隊列獲取 {len(message_ids)} 條消息")
+                    # 性能監控 - 定期報告處理情況
+                    if queue_length > 100:  # 只在有堆積時報告
+                        logger.info(f"工作線程 {worker_id} 從隊列獲取 {len(message_ids)} 條消息 (隊列長度: {queue_length}, 批次大小: {self.batch_size}, 處理間隔: {current_interval}s)")
+                    else:
+                        logger.info(f"工作線程 {worker_id} 從隊列獲取 {len(message_ids)} 條消息")
 
-                    # 處理批次中的每個消息
+                    # 並行處理批次中的每個消息以提高效率
+                    tasks = []
                     for msg_id in message_ids:
-                        # 先將消息從待處理隊列移到處理中隊列
-                        await cache_service.move_list_item(
-                            self.message_queue_key,
-                            self.processing_queue_key,
-                            msg_id
-                        )
+                        task = asyncio.create_task(self._process_single_message(msg_id))
+                        tasks.append(task)
+                    
+                    # 等待所有任務完成
+                    await asyncio.gather(*tasks, return_exceptions=True)
 
-                        # 獲取消息內容
-                        message = await cache_service.get(f"{self.cache_key_prefix}{msg_id}")
-
-                        if not message:
-                            logger.warning(f"消息 {msg_id} 不存在或已過期")
-                            await cache_service.remove_list_item(self.processing_queue_key, msg_id)
-                            continue
-
-                        # 處理消息
-                        success = await self._process_message(msg_id, message)
-
-                        if success:
-                            # 成功處理，從處理中隊列移除
-                            await cache_service.remove_list_item(self.processing_queue_key, msg_id)
-                            # 更新消息狀態為已完成
-                            message["status"] = "completed"
-                            message["completed_at"] = int(time.time())
-                            await cache_service.set(
-                                f"{self.cache_key_prefix}{msg_id}",
-                                message,
-                                expiry=7 * 24 * 3600  # 保留7天
-                            )
-                        else:
-                            # 處理失敗，根據重試次數決定下一步
-                            message["retries"] += 1
-                            message["status"] = "failed"
-                            message["last_processed"] = int(time.time())
-
-                            if message["retries"] >= self.max_retries:
-                                logger.warning(f"消息 {msg_id} 達到最大重試次數，標記為永久失敗")
-                                message["status"] = "permanent_failure"
-                                # 從處理中隊列移除
-                                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
-                            else:
-                                # 計算下次重試時間
-                                retry_key = min(message["retries"], max(self.error_backoff.keys()))
-                                backoff_time = self.error_backoff.get(retry_key, 1800)
-
-                                # 更新消息
-                                message["next_retry"] = int(time.time()) + backoff_time
-
-                                # 暫時從處理中隊列移除，稍後會重新加入待處理隊列
-                                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
-
-                                # 延遲一段時間後重新加入待處理隊列
-                                asyncio.create_task(self._requeue_after_delay(msg_id, backoff_time))
-
-                            # 保存更新後的消息
-                            await cache_service.set(
-                                f"{self.cache_key_prefix}{msg_id}",
-                                message,
-                                expiry=7 * 24 * 3600
-                            )
-
-                    # 批次處理完成後，短暫休息
-                    await asyncio.sleep(0.02)  # 進一步減少休息時間到0.02秒
+                    # 批次處理完成後，短暫休息 - 使用動態間隔
+                    await asyncio.sleep(min(current_interval, 0.02))  # 使用動態間隔，最大不超過0.02秒
 
                 except asyncio.CancelledError:
                     raise
@@ -582,6 +564,106 @@ class MessageProcessor:
                 # 嘗試重啟處理循環
                 await asyncio.sleep(5)
                 # 注意：這裡不應該重新創建任務，因為任務管理已經在start方法中處理
+
+    async def _process_single_message(self, msg_id: str) -> bool:
+        """處理單個消息 - 包含完整的消息處理流程"""
+        try:
+            # 先將消息從待處理隊列移到處理中隊列
+            await cache_service.move_list_item(
+                self.message_queue_key,
+                self.processing_queue_key,
+                msg_id
+            )
+
+            # 獲取消息內容
+            message = await cache_service.get(f"{self.cache_key_prefix}{msg_id}")
+
+            if not message:
+                logger.warning(f"消息 {msg_id} 不存在或已過期")
+                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                return False
+
+            # 檢查消息是否過期（如果啟用了跳過舊消息功能）
+            if self.skip_old_messages:
+                try:
+                    event_data = message.get("data", {})
+                    event = event_data.get("event", {})
+                    msg_timestamp = event.get("timestamp", 0)
+                    
+                    # 如果是毫秒時間戳，轉換為秒
+                    if msg_timestamp > 10**12:
+                        msg_timestamp = msg_timestamp // 1000
+                    
+                    current_time = int(time.time())
+                    age_seconds = current_time - msg_timestamp
+                    
+                    if age_seconds > self.message_expiry_seconds:
+                        logger.info(f"跳過過期消息 {msg_id}，消息年齡: {age_seconds}秒")
+                        # 直接標記為已完成，不進行實際處理
+                        message["status"] = "skipped_expired"
+                        message["completed_at"] = int(time.time())
+                        await cache_service.set(
+                            f"{self.cache_key_prefix}{msg_id}",
+                            message,
+                            expiry=7 * 24 * 3600
+                        )
+                        await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                        return True
+                except Exception as e:
+                    logger.warning(f"檢查消息 {msg_id} 時間戳時發生錯誤: {e}")
+                    # 如果檢查失敗，繼續正常處理
+                    pass
+
+            # 處理消息
+            success = await self._process_message(msg_id, message)
+
+            if success:
+                # 成功處理，從處理中隊列移除
+                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                # 更新消息狀態為已完成
+                message["status"] = "completed"
+                message["completed_at"] = int(time.time())
+                await cache_service.set(
+                    f"{self.cache_key_prefix}{msg_id}",
+                    message,
+                    expiry=7 * 24 * 3600  # 保留7天
+                )
+                return True
+            else:
+                # 處理失敗，根據重試次數決定下一步
+                message["retries"] += 1
+                message["status"] = "failed"
+                message["last_processed"] = int(time.time())
+
+                if message["retries"] >= self.max_retries:
+                    logger.warning(f"消息 {msg_id} 達到最大重試次數，標記為永久失敗")
+                    message["status"] = "permanent_failure"
+                    # 從處理中隊列移除
+                    await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                else:
+                    # 計算下次重試時間
+                    retry_key = min(message["retries"], max(self.error_backoff.keys()))
+                    backoff_time = self.error_backoff.get(retry_key, 1800)
+
+                    # 更新消息
+                    message["next_retry"] = int(time.time()) + backoff_time
+
+                    # 暫時從處理中隊列移除，稍後會重新加入待處理隊列
+                    await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+
+                    # 延遲一段時間後重新加入待處理隊列
+                    asyncio.create_task(self._requeue_after_delay(msg_id, backoff_time))
+
+                # 保存更新後的消息
+                await cache_service.set(
+                    f"{self.cache_key_prefix}{msg_id}",
+                    message,
+                    expiry=7 * 24 * 3600
+                )
+                return False
+        except Exception as e:
+            logger.error(f"處理單個消息 {msg_id} 時發生錯誤: {e}")
+            return False
 
     async def _process_message(self, message_id: str, message: Dict[str, Any]) -> bool:
         """處理單個消息"""
@@ -707,26 +789,124 @@ class MessageProcessor:
         try:
             # 獲取所有處理中的消息ID
             processing_messages = await cache_service.get_list_items(self.processing_queue_key)
-            if not processing_messages:
-                return
-
-            logger.info(f"發現 {len(processing_messages)} 條舊的處理中消息，將其移除...")
-            for msg_id in processing_messages:
-                await cache_service.remove_list_item(self.processing_queue_key, msg_id)
-                logger.info(f"移除處理中消息: {msg_id}")
+            if processing_messages:
+                logger.info(f"發現 {len(processing_messages)} 條舊的處理中消息，將其移除...")
+                for msg_id in processing_messages:
+                    await cache_service.remove_list_item(self.processing_queue_key, msg_id)
+                    logger.info(f"移除處理中消息: {msg_id}")
+            else:
+                logger.info("沒有發現舊的處理中消息")
 
             # 獲取所有待處理的消息ID
             message_queue_messages = await cache_service.get_list_items(self.message_queue_key)
-            if not message_queue_messages:
-                return
-
-            logger.info(f"發現 {len(message_queue_messages)} 條舊的待處理消息，將其移除...")
-            for msg_id in message_queue_messages:
-                await cache_service.remove_list_item(self.message_queue_key, msg_id)
-                logger.info(f"移除待處理消息: {msg_id}")
+            if message_queue_messages:
+                logger.info(f"發現 {len(message_queue_messages)} 條舊的待處理消息，將其移除...")
+                for msg_id in message_queue_messages:
+                    await cache_service.remove_list_item(self.message_queue_key, msg_id)
+                    logger.info(f"移除待處理消息: {msg_id}")
+            else:
+                logger.info("沒有發現舊的待處理消息")
+                
+            # 清除相關的消息緩存
+            msg_keys = await cache_service.keys_pattern(f"{self.cache_key_prefix}*")
+            if msg_keys:
+                logger.info(f"發現 {len(msg_keys)} 個舊的消息緩存鍵，將其移除...")
+                for key in msg_keys:
+                    await cache_service.delete(key)
+                logger.info("舊的消息緩存已清除")
+            else:
+                logger.info("沒有發現舊的消息緩存")
+                
+            logger.info("所有舊的處理數據已清除完成")
 
         except Exception as e:
             logger.error(f"清除舊處理數據時發生錯誤: {e}")
+
+    async def _clear_expired_messages(self) -> int:
+        """清除過期消息"""
+        try:
+            expired_count = 0
+            current_time = int(time.time())
+            
+            # 獲取所有待處理消息
+            message_queue_messages = await cache_service.get_list_items(self.message_queue_key)
+            
+            for msg_id in message_queue_messages:
+                try:
+                    # 獲取消息內容
+                    message = await cache_service.get(f"{self.cache_key_prefix}{msg_id}")
+                    
+                    if not message:
+                        # 消息不存在，從隊列中移除
+                        await cache_service.remove_list_item(self.message_queue_key, msg_id)
+                        expired_count += 1
+                        continue
+                    
+                    # 檢查消息時間戳
+                    event_data = message.get("data", {})
+                    event = event_data.get("event", {})
+                    msg_timestamp = event.get("timestamp", 0)
+                    
+                    # 如果是毫秒時間戳，轉換為秒
+                    if msg_timestamp > 10**12:
+                        msg_timestamp = msg_timestamp // 1000
+                    
+                    age_seconds = current_time - msg_timestamp
+                    
+                    if age_seconds > self.message_expiry_seconds:
+                        # 消息已過期，從隊列中移除
+                        await cache_service.remove_list_item(self.message_queue_key, msg_id)
+                        
+                        # 標記消息為已跳過
+                        message["status"] = "skipped_expired"
+                        message["completed_at"] = current_time
+                        await cache_service.set(
+                            f"{self.cache_key_prefix}{msg_id}",
+                            message,
+                            expiry=7 * 24 * 3600
+                        )
+                        
+                        expired_count += 1
+                        logger.debug(f"清除過期消息 {msg_id}，年齡: {age_seconds}秒")
+                    
+                except Exception as e:
+                    logger.warning(f"處理消息 {msg_id} 時發生錯誤: {e}")
+                    continue
+            
+            return expired_count
+            
+        except Exception as e:
+            logger.error(f"清除過期消息時發生錯誤: {e}")
+            return 0
+
+    async def _periodic_cleanup_expired_messages(self):
+        """定期清理過期消息的任務"""
+        cleanup_interval = 300  # 每5分鐘清理一次
+        
+        try:
+            while self.running:
+                await asyncio.sleep(cleanup_interval)
+                
+                if not self.running:
+                    break
+                
+                try:
+                    # 只在隊列有積壓時進行清理
+                    queue_length = await cache_service.get_list_length(self.message_queue_key)
+                    if queue_length > 100:
+                        logger.info(f"隊列長度 {queue_length}，開始定期清理過期消息")
+                        expired_count = await self._clear_expired_messages()
+                        if expired_count > 0:
+                            logger.info(f"定期清理：已清除 {expired_count} 條過期消息")
+                    
+                except Exception as e:
+                    logger.error(f"定期清理過期消息時發生錯誤: {e}")
+                    
+        except asyncio.CancelledError:
+            logger.info("定期清理過期消息任務被取消")
+            raise
+        except Exception as e:
+            logger.error(f"定期清理過期消息任務發生錯誤: {e}")
 
 # 創建全局實例
 message_processor = MessageProcessor()

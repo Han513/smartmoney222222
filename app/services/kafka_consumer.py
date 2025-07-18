@@ -29,13 +29,20 @@ class KafkaConsumerService:
         self.consumer = None
         self.topic = settings.KAFKA_TOPIC
         self.bootstrap_servers = settings.KAFKA_BOOTSTRAP_SERVERS
-        self.group_id = settings.KAFKA_GROUP_ID
+        
+        # 生成唯一的 group_id，確保每次重啟都消費最新數據
+        timestamp = int(time.time())
+        unique_id = str(uuid.uuid4())[:8]  # 使用UUID的前8個字符
+        self.group_id = f"{settings.KAFKA_GROUP_ID}_{timestamp}_{unique_id}"
+        
         self.running = False
         self.task = None
         self.cache_key_prefix = "kafka_msg:"
         self.message_queue_key = "kafka_message_queue"
         self.processing_queue_key = "kafka_processing_queue"
         self.max_retries = 3
+        
+        logger.info(f"生成新的 Kafka Group ID: {self.group_id}")
     
     async def start(self):
         """啟動 Kafka 消費者服務"""
@@ -44,6 +51,7 @@ class KafkaConsumerService:
             return True
             
         logger.info(f"啟動 Kafka 消費者服務，連接到 {self.bootstrap_servers}, 主題: {self.topic}")
+        logger.info(f"使用 Group ID: {self.group_id}")
         
         # 清除舊的Kafka相關緩存數據
         try:
@@ -62,15 +70,14 @@ class KafkaConsumerService:
                 auto_offset_reset="latest",
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 enable_auto_commit=False,
-                # 基本配置 - 優化以提高消費速度
-                session_timeout_ms=30000,
-                heartbeat_interval_ms=3000,
-                max_poll_interval_ms=300000,
-                max_poll_records=1000,  # 增加每次拉取的消息數量，從500增加到1000
-                fetch_max_wait_ms=100,  # 減少等待時間，從500ms減少到100ms
+                # 優化配置
+                session_timeout_ms=120000,  # 2分鐘
+                heartbeat_interval_ms=2000, # 2秒
+                max_poll_interval_ms=900000, # 15分鐘
+                max_poll_records=100,        # 每批最多100條，避免單批處理過久
+                fetch_max_wait_ms=100,       # 最多等100ms
                 fetch_min_bytes=1,
-                fetch_max_bytes=52428800,
-                # 其他配置
+                fetch_max_bytes=52428800,    # 50MB
                 check_crcs=True
             )
             
@@ -290,6 +297,22 @@ class KafkaConsumerService:
                 logger.info("舊的Kafka緩存數據已清除")
             else:
                 logger.info("沒有舊的Kafka緩存數據需要清除")
+            
+            # 清除相關的事件隊列緩存
+            event_queue_keys = [
+                "smart_token_events_queue",
+                "kafka_message_queue",
+                "kafka_processing_queue"
+            ]
+            
+            for key in event_queue_keys:
+                try:
+                    await cache_service.delete(key)
+                    logger.info(f"已清除事件隊列: {key}")
+                except Exception as e:
+                    logger.warning(f"清除事件隊列 {key} 時發生錯誤: {e}")
+                    
+            logger.info("所有相關緩存數據已清除完成")
         except Exception as e:
             logger.exception(f"清除舊緩存數據時發生錯誤: {e}")
 

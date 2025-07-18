@@ -127,19 +127,19 @@ class TransactionProcessor:
         self.cache_update_threshold = 100  # 緩存更新閾值
         self.cache_update_interval = 300  # 緩存更新間隔（秒）
         self.last_cache_update = time.time()  # 上次緩存更新時間
-        self.cache_lock = asyncio.Lock()  # 緩存鎖
+        self.cache_lock = None  # 緩存鎖 - 延遲初始化
         self.pending_updates = 0  # 待更新的交易數量
         self.processed_tokens = set()  # 已處理過的代幣集合
     
         # WalletTokenState 緩存機制
         self.wallet_token_state_cache = {}  # 錢包代幣狀態緩存
-        self.state_cache_lock = asyncio.Lock()  # 狀態緩存鎖
+        self.state_cache_lock = None  # 狀態緩存鎖 - 延遲初始化
         self.state_cache_update_threshold = 50  # 狀態緩存更新閾值
         self.state_cache_update_interval = 180  # 狀態緩存更新間隔（秒）
         self.last_state_cache_update = time.time()  # 上次狀態緩存更新時間
         self.pending_state_updates = 0  # 待更新的狀態數量
         self.max_signature_cache_size = 2000
-        self._pending_lock = asyncio.Lock()
+        self._pending_lock = None  # 延遲初始化
     
     def activate(self):
         """激活交易處理器，啟動事件處理循環"""
@@ -154,8 +154,18 @@ class TransactionProcessor:
         # 初始化 Ian 資料庫連接
         self._init_ian_db_connection()
         
+        # 初始化異步鎖 - 在事件循環中延遲初始化
+        self._init_async_locks()
+        
         # 加載 WalletTokenState 數據到緩存
-        asyncio.create_task(self._load_wallet_token_states_to_cache())
+        try:
+            # 獲取當前事件循環，如果不存在則跳過
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                asyncio.create_task(self._load_wallet_token_states_to_cache())
+        except RuntimeError:
+            # 沒有運行中的事件循環，跳過異步任務創建
+            pass
         
         # 啟動事件處理循環
         self.running = True
@@ -164,6 +174,38 @@ class TransactionProcessor:
         if not self.db_enabled:
             logger.warning("数据库功能未启用")
         return True
+
+    def _init_async_locks(self):
+        """初始化異步鎖，確保它們在正確的事件循環中創建"""
+        try:
+            # 獲取當前事件循環，如果不存在則跳過
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                if self.cache_lock is None:
+                    self.cache_lock = asyncio.Lock()
+                if self.state_cache_lock is None:
+                    self.state_cache_lock = asyncio.Lock()
+                if self._pending_lock is None:
+                    self._pending_lock = asyncio.Lock()
+                logger.info("異步鎖已初始化")
+        except RuntimeError:
+            # 沒有運行中的事件循環，鎖將在使用時動態創建
+            logger.info("沒有運行中的事件循環，異步鎖將在使用時動態創建")
+
+    def _ensure_async_locks(self):
+        """確保異步鎖已初始化"""
+        try:
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                if self.cache_lock is None:
+                    self.cache_lock = asyncio.Lock()
+                if self.state_cache_lock is None:
+                    self.state_cache_lock = asyncio.Lock()
+                if self._pending_lock is None:
+                    self._pending_lock = asyncio.Lock()
+        except RuntimeError:
+            # 沒有運行中的事件循環，無法創建鎖
+            pass
 
     async def stop(self):
         """停止事件處理循環"""
@@ -179,10 +221,19 @@ class TransactionProcessor:
             await self._send_events_batch(self.pending_events)
             self.pending_events = []
         # 服務關閉時推送剩餘事件
-        async with self._pending_lock:
+        # 確保異步鎖已初始化
+        self._ensure_async_locks()
+        
+        if self._pending_lock is not None:
+            async with self._pending_lock:
+                if self.pending_events:
+                    logger.info(f"服務關閉，推送剩餘 {len(self.pending_events)} 個事件")
+                    await self._send_events_batch(self.pending_events)
+                    self.pending_events.clear()
+        else:
+            # 如果沒有鎖，直接清空事件（避免阻塞）
             if self.pending_events:
-                logger.info(f"服務關閉，推送剩餘 {len(self.pending_events)} 個事件")
-                await self._send_events_batch(self.pending_events)
+                logger.warning("沒有事件循環，直接清空剩餘事件")
                 self.pending_events.clear()
 
     # ======= 以下為已註解的定時推送相關邏輯 =======
@@ -225,10 +276,10 @@ class TransactionProcessor:
             sig = e.get('signature')
             # signature級別去重，確保同一signature只推送一次
             if sig and sig in self._processed_signatures:
-                logger.warning(f"[API推送去重] signature {sig} 已推送過，跳過")
+                # logger.warning(f"[API推送去重] signature {sig} 已推送過，跳過")
                 continue
             if now - last_push < self._event_push_cache_expiry:
-                logger.warning(f"[API推送去重] 事件 {event_key} 在{self._event_push_cache_expiry}秒內已推送過，跳過")
+                # logger.warning(f"[API推送去重] 事件 {event_key} 在{self._event_push_cache_expiry}秒內已推送過，跳過")
                 continue
             filtered_events.append(e)
             self._event_push_cache[event_key] = now
@@ -1470,8 +1521,15 @@ class TransactionProcessor:
             # 更新待處理交易計數
             self._increment_pending_updates()
             
-            # 檢查是否需要更新緩存到數據庫
-            asyncio.create_task(self._check_cache_update_needed(wallet_address))
+            # 檢查是否需要更新緩存到數據庫 - 修復事件循環問題
+            try:
+                # 獲取當前事件循環，如果不存在則跳過
+                loop = asyncio.get_running_loop()
+                if loop and not loop.is_closed():
+                    asyncio.create_task(self._check_state_cache_update_needed(wallet_address, token_address))
+            except RuntimeError:
+                # 沒有運行中的事件循環，跳過異步任務創建
+                pass
 
             return {
                 "success": True,
@@ -3085,94 +3143,67 @@ class TransactionProcessor:
     # 同步版本，可以在非異步環境中使用
     async def get_sol_balance(self, wallet_address: str) -> dict:
         """
-        获取 SOL 余额及其美元价值 - 增强错误处理和多次尝试
+        获取 SOL 余额及其美元价值 - 快速失败，不重试
         """
-        # 设定 RPC URLs
-        primary_rpc = getattr(settings, "SOLANA_RPC_URL", "https://api.mainnet-beta.solana.com")
-        backup_rpc = getattr(settings, "SOLANA_RPC_URL_BACKUP", "https://solana-api.projectserum.com")
-        fallback_rpcs = [
-            "https://rpc.ankr.com/solana",
-            "https://solana-mainnet.rpc.extrnode.com"
-        ]
-        
-        client = None
-        max_retries = 3  # 最大尝试次数
+        # 设定主 RPC URL
+        primary_rpc = getattr(settings, "SOLANA_RPC_URL", "https://jadeite-greasily-xykrmnpgkw-dedicated.helius-rpc.com?api-key=90e3661e-4c5f-4e6b-af81-7aed2fd0f5be")
         default_balance = {"decimals": 9, "balance": {"int": 0, "float": 0.0}, "lamports": 0}
-        
+
         # 将pubkey转换移到try块内，避免因无效钱包地址导致崩溃
         try:
             pubkey = Pubkey(base58.b58decode(wallet_address))
         except Exception as e:
             logger.error(f"转换钱包地址到Pubkey时失败: {str(e)}")
             return default_balance
-        
-        # 按顺序尝试所有可用的 RPC
-        rpcs_to_try = [primary_rpc, backup_rpc] + fallback_rpcs
-        
-        for retry in range(max_retries):
-            for rpc_index, rpc_url in enumerate(rpcs_to_try):
+
+        client = None
+        try:
+            # 确保URL格式正确
+            if not primary_rpc.startswith(("http://", "https://")):
+                primary_rpc = f"https://{primary_rpc}"
+
+            # 创建客户端，设置较短的超时时间
+            client = AsyncClient(primary_rpc, timeout=5)
+
+            # 获取余额
+            balance_response = await client.get_balance(pubkey=pubkey)
+
+            # 获取 SOL 价格 (如果发生错误，使用默认值)
+            sol_price = 125.0  # 默认值
+            try:
+                sol_info = self.get_sol_info("So11111111111111111111111111111111111111112")
+                if sol_info and "priceUsd" in sol_info:
+                    sol_price = sol_info.get("priceUsd", sol_price)
+            except Exception as e:
+                logger.warning(f"获取 SOL 价格时出错: {e}, 使用默认价格 {sol_price}")
+
+            # 计算 SOL 余额和美元价值
+            lamports = balance_response.value
+            sol_balance = lamports / 10**9
+            usd_value = sol_balance * sol_price
+
+            logger.info(f"钱包 {wallet_address} 的 SOL 余额: {sol_balance:.6f} (${usd_value:.2f})")
+
+            return {
+                'decimals': 9,
+                'balance': {
+                    'int': sol_balance,
+                    'float': float(usd_value)
+                },
+                'lamports': lamports
+            }
+
+        except Exception as e:
+            logger.warning(f"获取钱包 {wallet_address} 的 SOL 余额失败: {str(e)}，直接返回0")
+            return default_balance
+        finally:
+            # 关闭客户端连接
+            if client:
                 try:
-                    # 确保URL格式正确
-                    if not rpc_url.startswith(("http://", "https://")):
-                        rpc_url = f"https://{rpc_url}"
-                    
-                    # 如果不是第一次尝试，记录日志
-                    if retry > 0 or rpc_index > 0:
-                        logger.info(f"尝试使用 RPC {rpc_index+1}/{len(rpcs_to_try)} (尝试 {retry+1}/{max_retries}): {rpc_url[:30]}...")
-                    
-                    # 创建客户端，设置超时时间
-                    client = AsyncClient(rpc_url, timeout=15)
-                    
-                    # 获取余额
-                    balance_response = await client.get_balance(pubkey=pubkey)
-                    
-                    # 获取 SOL 价格 (如果发生错误，使用默认值)
-                    sol_price = 125.0  # 默认值
-                    try:
-                        sol_info = self.get_sol_info("So11111111111111111111111111111111111111112")
-                        if sol_info and "priceUsd" in sol_info:
-                            sol_price = sol_info.get("priceUsd", sol_price)
-                    except Exception as e:
-                        logger.warning(f"获取 SOL 价格时出错: {e}, 使用默认价格 {sol_price}")
-                    
-                    # 计算 SOL 余额和美元价值
-                    lamports = balance_response.value
-                    sol_balance = lamports / 10**9
-                    usd_value = sol_balance * sol_price
-                    
-                    logger.info(f"钱包 {wallet_address} 的 SOL 余额: {sol_balance:.6f} (${usd_value:.2f})")
-                    
-                    return {
-                        'decimals': 9,
-                        'balance': {
-                            'int': sol_balance,
-                            'float': float(usd_value)
-                        },
-                        'lamports': lamports
-                    }
-                    
-                except Exception as e:
-                    rpc_name = "主" if rpc_index == 0 else "备用" if rpc_index == 1 else f"额外 #{rpc_index-1}"
-                    logger.error(f"使用{rpc_name} RPC 获取 SOL 余额时发生异常: {str(e)}")
-                    
-                    # 关闭客户端连接
-                    if client:
-                        try:
-                            await client.close()
-                        except:
-                            pass
-                        client = None
-                    
-                    # 如果是最后一个RPC，等待一小段时间后重试
-                    if rpc_index == len(rpcs_to_try) - 1 and retry < max_retries - 1:
-                        wait_time = (retry + 1) * 1.5  # 逐渐增加等待时间
-                        logger.info(f"所有RPC都失败，等待 {wait_time:.1f} 秒后重试...")
-                        await asyncio.sleep(wait_time)
-        
-        # 如果所有尝试都失败，返回默认值
-        logger.warning(f"无法获取钱包 {wallet_address} 的余额，所有尝试均失败")
-        return default_balance
-        
+                    await client.close()
+                except:
+                    pass
+
     @staticmethod
     def get_sol_info(token_mint_address: str) -> dict:
         """
@@ -3536,6 +3567,15 @@ class TransactionProcessor:
     async def _check_cache_update_needed(self, wallet_address: str):
         """檢查是否需要將緩存更新到數據庫"""
         current_time = time.time()
+        
+        # 確保異步鎖已初始化
+        self._ensure_async_locks()
+        
+        # 如果鎖仍然為 None（沒有事件循環），跳過緩存更新
+        if self.cache_lock is None:
+            logger.warning("沒有事件循環，跳過緩存更新")
+            return
+            
         async with self.cache_lock:
             # 檢查是否達到更新條件
             if (self.pending_updates >= self.cache_update_threshold or 
@@ -3762,12 +3802,28 @@ class TransactionProcessor:
         # 增加待更新計數
         self.pending_state_updates += 1
         
-        # 檢查是否需要更新到數據庫
-        asyncio.create_task(self._check_state_cache_update_needed(wallet_address, token_address))
+        # 檢查是否需要更新到數據庫 - 修復事件循環問題
+        try:
+            # 獲取當前事件循環，如果不存在則跳過
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                asyncio.create_task(self._check_state_cache_update_needed(wallet_address, token_address))
+        except RuntimeError:
+            # 沒有運行中的事件循環，跳過異步任務創建
+            pass
 
     async def _check_state_cache_update_needed(self, wallet_address: str, token_address: str):
         """檢查是否需要將狀態緩存更新到數據庫"""
         current_time = time.time()
+        
+        # 確保異步鎖已初始化
+        self._ensure_async_locks()
+        
+        # 如果鎖仍然為 None（沒有事件循環），跳過狀態緩存更新
+        if self.state_cache_lock is None:
+            logger.warning("沒有事件循環，跳過狀態緩存更新")
+            return
+            
         async with self.state_cache_lock:
             # 檢查是否達到更新條件
             if (self.pending_state_updates >= self.state_cache_update_threshold or 
@@ -4027,6 +4083,14 @@ class TransactionProcessor:
         return hashlib.md5(sorted_content.encode()).hexdigest()
 
     async def add_event_to_pending(self, event, signature=None):
+        # 確保異步鎖已初始化
+        self._ensure_async_locks()
+        
+        # 如果鎖仍然為 None（沒有事件循環），跳過事件推送
+        if self._pending_lock is None:
+            logger.warning("沒有事件循環，跳過事件推送")
+            return True
+            
         async with self._pending_lock:
             if not signature:
                 signature = event.get('signature')

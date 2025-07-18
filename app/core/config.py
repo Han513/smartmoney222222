@@ -25,11 +25,26 @@ class Settings(BaseSettings):
     REDIS_HOST: str = "localhost"
     REDIS_PORT: int = 6379
     REDIS_DB: int = 0
-    REDIS_URL: str = f"redis://{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    REDIS_PASSWORD: Optional[str] = os.getenv("REDIS_PASSWORD", "")
     
-    # Celery 配置
-    CELERY_BROKER_URL: str = f"redis://{REDIS_HOST}:{REDIS_PORT}/1"
-    CELERY_RESULT_BACKEND: str = f"redis://{REDIS_HOST}:{REDIS_PORT}/1"
+    # 組裝 Redis 認證字串
+    _REDIS_AUTH: str = f":{REDIS_PASSWORD}@" if REDIS_PASSWORD else ""
+
+    # Redis 連線字串，優先使用環境變量 REDIS_URL
+    REDIS_URL: str = os.getenv(
+        "REDIS_URL",
+        f"redis://{_REDIS_AUTH}{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
+    )
+    
+    # Celery Broker & Backend，優先使用環境變量，如未指定則動態組裝
+    CELERY_BROKER_URL: str = os.getenv(
+        "CELERY_BROKER_URL",
+        f"redis://{_REDIS_AUTH}{REDIS_HOST}:{REDIS_PORT}/1"
+    )
+    CELERY_RESULT_BACKEND: str = os.getenv(
+        "CELERY_RESULT_BACKEND",
+        f"redis://{_REDIS_AUTH}{REDIS_HOST}:{REDIS_PORT}/1"
+    )
     CELERY_TASK_SERIALIZER: str = "json"
     CELERY_RESULT_SERIALIZER: str = "json"
     CELERY_ACCEPT_CONTENT: List[str] = ["json"]
@@ -62,7 +77,7 @@ class Settings(BaseSettings):
     SOLSCAN_API_TOKEN: str = os.getenv("SOLSCAN_API_TOKEN", "1234567890")
     SOLSCAN_API_URL: str = os.getenv("SOLSCAN_API_URL", "https://pro-api.solscan.io/v2.0")
 
-    WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://172.16.60.141:30008/internal/sync_kol_wallets")
+    WALLET_SYNC_API_ENDPOINT: str = os.getenv("WALLET_SYNC_API_ENDPOINT", "http://moonx.backend:4200/internal/sync_kol_wallets")
 
     # 系統限制
     MAX_CONCURRENT_REQUESTS: int = 10
