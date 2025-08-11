@@ -29,29 +29,26 @@ class KafkaConsumerService:
         self.consumer = None
         self.topic = settings.KAFKA_TOPIC
         self.bootstrap_servers = settings.KAFKA_BOOTSTRAP_SERVERS
-        
-        # 生成唯一的 group_id，確保每次重啟都消費最新數據
+        # 自動生成新的group_id，包含時間戳和隨機字符串
+        import uuid
+        import time
         timestamp = int(time.time())
-        unique_id = str(uuid.uuid4())[:8]  # 使用UUID的前8個字符
-        self.group_id = f"{settings.KAFKA_GROUP_ID}_{timestamp}_{unique_id}"
-        
+        random_suffix = str(uuid.uuid4())[:8]
+        self.group_id = f"{settings.KAFKA_GROUP_ID}_{timestamp}_{random_suffix}"
         self.running = False
         self.task = None
         self.cache_key_prefix = "kafka_msg:"
         self.message_queue_key = "kafka_message_queue"
         self.processing_queue_key = "kafka_processing_queue"
         self.max_retries = 3
-        
-        logger.info(f"生成新的 Kafka Group ID: {self.group_id}")
     
     async def start(self):
         """啟動 Kafka 消費者服務"""
         if self.running:
             logger.info("Kafka 消費者服務已在運行中")
             return True
-            
-        logger.info(f"啟動 Kafka 消費者服務，連接到 {self.bootstrap_servers}, 主題: {self.topic}")
-        logger.info(f"使用 Group ID: {self.group_id}")
+        
+        logger.info(f"啟動 Kafka 消費者服務，連接到 {self.bootstrap_servers}, 主題: {self.topic}, group_id: {self.group_id}")
         
         # 清除舊的Kafka相關緩存數據
         try:
@@ -70,14 +67,15 @@ class KafkaConsumerService:
                 auto_offset_reset="latest",
                 value_deserializer=lambda m: json.loads(m.decode('utf-8')),
                 enable_auto_commit=False,
-                # 優化配置
-                session_timeout_ms=120000,  # 2分鐘
-                heartbeat_interval_ms=2000, # 2秒
-                max_poll_interval_ms=900000, # 15分鐘
-                max_poll_records=100,        # 每批最多100條，避免單批處理過久
-                fetch_max_wait_ms=100,       # 最多等100ms
+                # 基本配置 - 優化以提高消費速度
+                session_timeout_ms=30000,
+                heartbeat_interval_ms=3000,
+                max_poll_interval_ms=300000,
+                max_poll_records=1000,  # 增加每次拉取的消息數量，從500增加到1000
+                fetch_max_wait_ms=100,  # 減少等待時間，從500ms減少到100ms
                 fetch_min_bytes=1,
-                fetch_max_bytes=52428800,    # 50MB
+                fetch_max_bytes=52428800,
+                # 其他配置
                 check_crcs=True
             )
             
@@ -191,6 +189,13 @@ class KafkaConsumerService:
         try:
             if self.consumer:
                 await self.consumer.stop()
+            
+            # 生成新的group_id
+            timestamp = int(time.time())
+            random_suffix = str(uuid.uuid4())[:8]
+            new_group_id = f"{settings.KAFKA_GROUP_ID}_{timestamp}_{random_suffix}"
+            self.group_id = new_group_id
+            logger.info(f"使用新的group_id: {new_group_id}")
                 
             self.consumer = AIOKafkaConsumer(
                 self.topic,
@@ -236,11 +241,38 @@ class KafkaConsumerService:
             if event["network"] != "SOLANA":
                 logger.info(f"跳過非 SOLANA 網絡事件: {event['network']}")
                 return False
+            
+            # 過濾特定錢包地址
+            wallet_address = event.get("address", "")
+            if wallet_address in self._get_filtered_wallet_addresses():
+                logger.info(f"跳過過濾錢包地址的交易: {wallet_address}")
+                return False
+            
+            # 過濾 poolAddress 結尾為 -R 的交易
+            pool_address = event.get("poolAddress", "")
+            if pool_address.endswith("-R"):
+                logger.info(f"跳過 poolAddress 結尾為 -R 的交易: {pool_address}")
+                return False
                 
             return True
         except Exception as e:
             logger.error(f"驗證事件格式出錯: {e}")
             return False
+    
+    def _get_filtered_wallet_addresses(self) -> set:
+        """獲取需要過濾的錢包地址列表"""
+        return {
+            'BF74pYX3A6freX6yfxwKUDDbzvysEiaJchr7zk1PN9wj',
+            'MfDuWeqSHEqTFVYZ7LoexgAK9dxk7cy4DFJWjWMGVWa',
+            '2kCm1RHGJjeCKL4SA3ZJCLyXqUD7nEJ7GMtVaP7c6jQ8',
+            'F9CNKPKRS3FaMgQF4dq8nj5KF1FjTfCUFQvWnVr8ig9g',
+            '5cU4swxyAyzbnmPMReCzXHXjfczUki626GHHiwEUmsu7',
+            'C4S5tUxPr7RVPrhEN7g2tBgStd2NiXhWLnmAWqmSv5df',
+            'Hv4Hkx5dgZtJMDwhoywhE6Wkh6dtbh6EFSpNYUT4VK5t',
+            'YubFizptp3MXUAtZmqkRS9DyCkMeZaVwiaRCGBTxayo',
+            '7BYDYDC3m67sWV9K3m4j5m9b7dVU3ZkXWgrr7KDxjQ4A',
+            'HV1KXxWFaSeriyFvXyx48FqG9BoFbfinB8njCJonqP7K'
+        }
     
     async def _cache_message(self, message_id: str, message_data: Dict[str, Any]):
         """將消息保存到緩存"""
@@ -282,39 +314,52 @@ class KafkaConsumerService:
     async def _clear_old_cache_data(self):
         """清除舊的Kafka相關緩存數據"""
         try:
+            logger.info("開始清除舊的Kafka緩存數據...")
+            
+            # 顯示清除前的狀態
+            message_queue_length = await cache_service.get_list_length(self.message_queue_key)
+            processing_queue_length = await cache_service.get_list_length(self.processing_queue_key)
+            
+            logger.info(f"清除前狀態 - 消息隊列: {message_queue_length}, 處理中隊列: {processing_queue_length}")
+            
             # 清除消息隊列
             await cache_service.delete(self.message_queue_key)
             await cache_service.delete(self.processing_queue_key)
             logger.info("已清除Kafka消息隊列")
+            
+            # 清除事件隊列（如果存在）
+            await cache_service.delete("smart_token_events_queue")
+            logger.info("已清除事件隊列")
             
             # 獲取所有以 "kafka_msg:" 開頭的緩存鍵
             keys_to_delete = await cache_service.keys_pattern(f"{self.cache_key_prefix}*")
             
             if keys_to_delete:
                 logger.info(f"將清除 {len(keys_to_delete)} 個舊的Kafka緩存鍵")
-                for key in keys_to_delete:
-                    await cache_service.delete(key)
+                
+                # 批量刪除以提高效率
+                batch_size = 100
+                for i in range(0, len(keys_to_delete), batch_size):
+                    batch = keys_to_delete[i:i + batch_size]
+                    for key in batch:
+                        await cache_service.delete(key)
+                    logger.info(f"已清除批次 {i//batch_size + 1}/{(len(keys_to_delete) + batch_size - 1)//batch_size}")
+                
                 logger.info("舊的Kafka緩存數據已清除")
             else:
                 logger.info("沒有舊的Kafka緩存數據需要清除")
             
-            # 清除相關的事件隊列緩存
-            event_queue_keys = [
-                "smart_token_events_queue",
-                "kafka_message_queue",
-                "kafka_processing_queue"
-            ]
+            # 顯示清除後的狀態
+            message_queue_length_after = await cache_service.get_list_length(self.message_queue_key)
+            processing_queue_length_after = await cache_service.get_list_length(self.processing_queue_key)
             
-            for key in event_queue_keys:
-                try:
-                    await cache_service.delete(key)
-                    logger.info(f"已清除事件隊列: {key}")
-                except Exception as e:
-                    logger.warning(f"清除事件隊列 {key} 時發生錯誤: {e}")
-                    
-            logger.info("所有相關緩存數據已清除完成")
+            logger.info(f"清除後狀態 - 消息隊列: {message_queue_length_after}, 處理中隊列: {processing_queue_length_after}")
+            logger.info("Kafka緩存數據清除完成")
+            
         except Exception as e:
             logger.exception(f"清除舊緩存數據時發生錯誤: {e}")
+            # 即使清除失敗，也繼續啟動服務
+            logger.warning("緩存清除失敗，但服務將繼續啟動")
 
 # 創建全局實例
 kafka_consumer = KafkaConsumerService()

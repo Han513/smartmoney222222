@@ -80,37 +80,11 @@ class WalletSyncService:
         logger.info("錢包同步服務已停止")
 
     async def add_wallet(self, wallet_address: str):
-        """添加待同步的錢包地址，帶去抖動機制"""
-        
-        current_time = time.time()
-        
-        # 檢查是否需要去抖動
-        last_update = self.wallet_update_times.get(wallet_address, 0)
-        if current_time - last_update < self.debounce_interval:
-            self.wallet_update_times[wallet_address] = current_time
-            self.wallet_update_counts[wallet_address] = self.wallet_update_counts.get(wallet_address, 0) + 1
-            logger.debug(f"錢包 {wallet_address} 更新頻繁，應用去抖動")
-            return
-            
-        self.wallet_update_times[wallet_address] = current_time
-        self.wallet_update_counts[wallet_address] = 1
-        
+        """僅添加待同步的錢包地址到集合中"""
         async with self.lock:
             self.updated_wallets.add(wallet_address)
-            
-            # 檢查是否需要立即同步
-            if len(self.updated_wallets) >= self.max_batch_size or current_time - self.last_sync_time >= self.sync_interval:
-                logger.info(f"待同步錢包數量: {len(self.updated_wallets)}，立即觸發同步")
-                
-                sync_task = asyncio.create_task(self._sync_wallets())
-                
-                sync_task.add_done_callback(self._on_sync_task_done)
-                
-                logger.info(f"已創建同步任務 (ID: {id(sync_task)})，錢包 {wallet_address} 已添加到同步隊列")
-                return
-        
-        logger.info(f"錢包 {wallet_address} 已成功添加到同步隊列")
-    
+            logger.debug(f"錢包 {wallet_address} 已添加到同步隊列")
+
     def _on_sync_task_done(self, task):
         """同步任務完成時的回調函數"""
         try:
@@ -122,72 +96,55 @@ class WalletSyncService:
             logger.exception(f"同步任務 (ID: {id(task)}) 發生錯誤: {e}")
 
     async def _sync_loop(self):
-        """同步循環，帶計數器重置和每日全量同步"""
-        reset_interval = 86400  # 每天重置一次計數器
-        full_sync_interval = 86400  # 每天執行一次全量同步
-        last_reset_time = time.time()
-        last_full_sync_time = time.time() - 86000
+        """同步循環，統一處理同步邏輯"""
+        logger.info("錢包同步循環已啟動")
         
-        try:
-            logger.info("錢包同步循環已啟動")
-            while self.running:
-                try:
-                    current_time = time.time()
-                    
-                    # 檢查是否需要重置計數器
-                    if current_time - last_reset_time >= reset_interval:
-                        self.wallet_update_counts = {}
-                        self.wallet_update_times = {}
-                        last_reset_time = current_time
-                        logger.info("已重置錢包更新計數器")
-                    
-                    # 檢查是否需要執行全量同步
-                    if current_time - last_full_sync_time >= full_sync_interval:
-                        logger.info("開始執行錢包資料全量同步...")
-                        await self._sync_all_wallets()
-                        last_full_sync_time = current_time
-                        logger.info("錢包資料全量同步完成")
-                    
-                    # 檢查是否有待同步的錢包
-                    async with self.lock:
-                        pending_wallets = len(self.updated_wallets)
-                    
-                    if pending_wallets > 0:
-                        logger.info(f"同步循環檢測到 {pending_wallets} 個待同步錢包")
-                    
-                    # 減少同步間隔
-                    await asyncio.sleep(self.sync_interval)
-                    
-                    # 執行同步並捕獲任何錯誤
-                    try:
-                        await self._sync_wallets()
-                    except Exception as e:
-                        logger.exception(f"執行同步操作時發生錯誤: {e}")
-                        
-                except asyncio.CancelledError:
-                    raise
-                except Exception as e:
-                    logger.exception(f"錢包同步循環發生錯誤: {e}")
-                    await asyncio.sleep(10)
-        except asyncio.CancelledError:
-            logger.info("錢包同步循環被取消")
-            raise
+        while self.running:
+            try:
+                async with self.lock:
+                    pending_wallets_count = len(self.updated_wallets)
+                
+                # 判斷是否需要同步
+                should_sync = (
+                    pending_wallets_count >= self.max_batch_size or
+                    (pending_wallets_count > 0 and time.time() - self.last_sync_time >= self.sync_interval)
+                )
+
+                if should_sync:
+                    await self._sync_wallets()
+
+                # 循環等待，使其具有響應性
+                await asyncio.sleep(5)
+
+            except asyncio.CancelledError:
+                logger.info("錢包同步循環被取消")
+                raise
+            except Exception as e:
+                logger.exception(f"錢包同步循環發生錯誤: {e}")
+                # 發生未知錯誤時，等待更長時間避免頻繁失敗
+                await asyncio.sleep(self.sync_interval)
     
     async def _sync_wallets(self):
         """同步錢包信息到外部 API"""
+        wallets_to_sync = []
         async with self.lock:
             if not self.updated_wallets:
-                logger.debug("沒有待同步的錢包，跳過同步")
                 return
-                    
-            wallets_to_sync = list(self.updated_wallets)
-            self.updated_wallets.clear()
-            # logger.info(f"從待同步集合中取出 {len(wallets_to_sync)} 個錢包地址")
-        
+
+            wallets_to_process = list(self.updated_wallets)
+            if len(wallets_to_process) > self.max_batch_size:
+                wallets_to_sync = wallets_to_process[:self.max_batch_size]
+            else:
+                wallets_to_sync = wallets_to_process
+            
+            # 從待處理集合中移除已取出的錢包
+            for wallet in wallets_to_sync:
+                self.updated_wallets.remove(wallet)
+
         if not wallets_to_sync:
             return
                 
-        # logger.info(f"開始同步 {len(wallets_to_sync)} 個錢包信息")
+        logger.info(f"開始同步 {len(wallets_to_sync)} 個錢包信息")
         self.last_sync_time = time.time()
         
         try:
@@ -229,6 +186,9 @@ class WalletSyncService:
 
         def safe_str(value):
             return str(value) if value is not None else ""
+
+        def safe_bool(value, default=False):
+            return bool(value) if value is not None else default
 
         result = []
         try:
@@ -297,7 +257,7 @@ class WalletSyncService:
                             "pnlPic30d": safe_str(wallet.pnl_pic_30d),
                             "pnlPic7d": safe_str(wallet.pnl_pic_7d),
                             "pnlPic1d": safe_str(wallet.pnl_pic_1d),
-                            "isSmartWallet": wallet.is_smart_wallet,
+                            "isSmartWallet": safe_bool(wallet.is_smart_wallet),
                             "totalTransactionNum30d": safe_int(wallet.total_transaction_num_30d),
                             "totalTransactionNum7d": safe_int(wallet.total_transaction_num_7d),
                             "totalTransactionNum1d": safe_int(wallet.total_transaction_num_1d),

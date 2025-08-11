@@ -271,25 +271,6 @@ class TokenRepository:
             except Exception as e:
                 logger.error(f"從 Ian 資料庫查詢代幣信息時出錯: {str(e)}")
         
-        # 4. 從本地數據庫同步獲取
-        if self.Session:
-            try:
-                session = self.Session()
-                db_token = session.query(TokenInfo).filter(TokenInfo.address == address).first()
-                
-                if db_token:
-                    token_data = db_token.as_dict()
-                    
-                    # 更新內存緩存
-                    self.in_memory_cache[address] = token_data
-                    self.cache_expiry[address] = current_time + timedelta(seconds=self.cache_ttl)
-                    
-                    return token_data
-            except SQLAlchemyError as e:
-                logger.error(f"從數據庫查詢代幣信息時錯誤: {e}")
-            finally:
-                session.close()
-        
         # 5. 如果內存和數據庫都沒有，使用同步 HTTP 獲取
         try:
             headers = {"token": self.api_token}

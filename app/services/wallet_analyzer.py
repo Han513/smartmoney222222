@@ -178,8 +178,7 @@ class WalletAnalyzer:
         time_range: int = 7,
         include_metrics: Optional[List[str]] = None,
         twitter_name: Optional[str] = None,
-        twitter_username: Optional[str] = None,
-        is_smart_wallet: bool = False
+        twitter_username: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         Internal method for analyzing a single wallet
@@ -191,7 +190,6 @@ class WalletAnalyzer:
             chain: 鏈名稱
             twitter_name: Twitter 名稱
             twitter_username: Twitter 用戶名
-            is_smart_wallet: 是否為智能錢包
         """
         try:
             # 獲取錢包活動記錄
@@ -305,8 +303,7 @@ class WalletAnalyzer:
                 await transaction_processor.update_wallet_summary(
                     wallet_address=address,
                     twitter_name=twitter_name,
-                    twitter_username=twitter_username,
-                    is_smart_wallet=is_smart_wallet
+                    twitter_username=twitter_username
                 )
                 
             except Exception as e:
@@ -371,8 +368,7 @@ class WalletAnalyzer:
         include_metrics: Optional[List[str]] = None,
         use_cache: bool = True,
         twitter_name: Optional[str] = None,
-        twitter_username: Optional[str] = None,
-        is_smart_wallet: bool = False
+        twitter_username: Optional[str] = None
     ) -> Dict[str, Any]:
         """
         分析單個錢包，計算指標
@@ -385,7 +381,6 @@ class WalletAnalyzer:
             use_cache: 是否使用快取的交易數據
             twitter_name: Twitter 名稱
             twitter_username: Twitter 用戶名
-            is_smart_wallet: 是否為智能錢包
         
         Returns:
             包含各種指標的字典
@@ -428,12 +423,11 @@ class WalletAnalyzer:
                     include_metrics=include_metrics,
                     chain=chain,
                     twitter_name=twitter_name,
-                    twitter_username=twitter_username,
-                    is_smart_wallet=is_smart_wallet
+                    twitter_username=twitter_username
                 )
                 
-                # 如果提供了 Twitter 資訊或 is_smart_wallet 標記，更新數據庫
-                if twitter_name or twitter_username or is_smart_wallet:
+                # 如果提供了 Twitter 資訊，更新數據庫
+                if twitter_name or twitter_username:
                     try:
                         session_factory = get_session_factory()
                         with session_factory() as session:
@@ -443,14 +437,13 @@ class WalletAnalyzer:
                             ).values(
                                 twitter_name=twitter_name,
                                 twitter_username=twitter_username,
-                                is_smart_wallet=is_smart_wallet,
                                 is_active=True
                             )
                             session.execute(stmt)
                             session.commit()
-                            logger.info(f"已更新錢包 {address} 的資訊 (Twitter: {twitter_name}, is_smart_wallet: {is_smart_wallet})")
+                            logger.info(f"已更新錢包 {address} 的 Twitter 資訊")
                     except Exception as e:
-                        logger.error(f"更新錢包 {address} 的資訊時出錯: {str(e)}")
+                        logger.error(f"更新錢包 {address} 的 Twitter 資訊時出錯: {str(e)}")
                 
                 # 設置結果
                 if not future.done():
@@ -559,8 +552,7 @@ class WalletAnalyzer:
         prefetch: bool = True,
         prefetch_tokens: bool = True,
         twitter_names: Optional[List[str]] = None,  # 改為複數形式
-        twitter_usernames: Optional[List[str]] = None,  # 改為複數形式
-        is_smart_wallet: bool = False
+        twitter_usernames: Optional[List[str]] = None  # 改為複數形式
     ) -> Dict[str, Dict[str, Any]]:
         """
         批量分析多個錢包
@@ -575,7 +567,6 @@ class WalletAnalyzer:
             prefetch_tokens: 是否預先載入代幣資料
             twitter_names: Twitter 名稱列表
             twitter_usernames: Twitter 用戶名列表
-            is_smart_wallet: 是否為智能錢包
         
         Returns:
             地址到分析結果的映射
@@ -718,8 +709,7 @@ class WalletAnalyzer:
                             include_metrics=include_metrics,
                             chain=chain,
                             twitter_name=twitter_info[addr]['name'],
-                            twitter_username=twitter_info[addr]['username'],
-                            is_smart_wallet=is_smart_wallet
+                            twitter_username=twitter_info[addr]['username']
                         )
                     except Exception as e:
                         logger.exception(f"Error analyzing wallet {addr}: {str(e)}")

@@ -19,6 +19,7 @@ class WalletCacheService:
         self.refresh_interval = 600  # 10分鐘
         self._refresh_task = None
         self._initialized = False
+        self._init_timeout = 15  # 減少初始化超時時間到15秒
     
     async def initialize(self):
         """初始化服務，加載數據到緩存並啟動定期刷新任務"""
@@ -27,25 +28,53 @@ class WalletCacheService:
             
         logger.info("開始初始化 WalletCacheService...")
         
-        # 首次加載數據
-        await self._load_wallet_addresses()
-        
-        # 啟動定期刷新任務
-        self._refresh_task = asyncio.create_task(self._periodic_refresh())
-        
-        self._initialized = True
-        logger.info("WalletCacheService 初始化完成")
+        try:
+            # 使用超時機制進行首次加載
+            await asyncio.wait_for(self._load_wallet_addresses(), timeout=self._init_timeout)
+            
+            # 啟動定期刷新任務
+            self._refresh_task = asyncio.create_task(self._periodic_refresh())
+            
+            self._initialized = True
+            logger.info("WalletCacheService 初始化完成")
+            
+        except asyncio.TimeoutError:
+            logger.error(f"WalletCacheService 初始化超時（{self._init_timeout}秒），將使用空緩存繼續運行")
+            # 即使超時也設置為已初始化，避免阻塞後續服務
+            self._initialized = True
+
+            await cache_service.set(self.cache_key, [], expiry=self.refresh_interval)
+            # 啟動定期刷新任務
+            self._refresh_task = asyncio.create_task(self._periodic_refresh())
+            
+        except Exception as e:
+            logger.error(f"WalletCacheService 初始化失敗: {e}")
+            # 即使失敗也設置為已初始化，避免阻塞後續服務
+            self._initialized = True
+
+            await cache_service.set(self.cache_key, [], expiry=self.refresh_interval)
+            # 啟動定期刷新任務
+            self._refresh_task = asyncio.create_task(self._periodic_refresh())
     
     async def _load_wallet_addresses(self):
         """從數據庫加載所有錢包地址到緩存"""
         try:
+            logger.info("開始從數據庫加載錢包地址...")
+            start_time = asyncio.get_event_loop().time()
+            
             with self.session_factory() as session:
-                result = session.execute(text("SELECT wallet_address FROM dex_query_v1.wallet WHERE chain = :chain"), {'chain': 'SOLANA'})
-                wallets = result.fetchall()
-                session.execute(text("SET search_path TO dex_query_v1;"))
-                # 查詢所有SOLANA錢包地址
-                stmt = select(WalletSummary.wallet_address).where(WalletSummary.chain == 'SOLANA')
-                addresses = session.execute(stmt).scalars().all()
+                # 優化：只使用一個查詢，優先使用 WalletSummary 表
+                try:
+                    session.execute(text("SET search_path TO dex_query_v1;"))
+                    stmt = select(WalletSummary.wallet_address).where(WalletSummary.chain == 'SOLANA')
+                    addresses = session.execute(stmt).scalars().all()
+                    logger.info(f"從 WalletSummary 表加載了 {len(addresses)} 個錢包地址")
+                except Exception as e:
+                    logger.warning(f"從 WalletSummary 表加載失敗，嘗試使用原生SQL: {e}")
+                    # 備用方案：使用原生SQL
+                    result = session.execute(text("SELECT wallet_address FROM dex_query_v1.wallet WHERE chain = :chain"), {'chain': 'SOLANA'})
+                    addresses = [row[0] for row in result.fetchall()]
+                    logger.info(f"從原生SQL加載了 {len(addresses)} 個錢包地址")
                 
                 # 將地址集合保存到緩存
                 await cache_service.set(
@@ -54,21 +83,28 @@ class WalletCacheService:
                     expiry=self.refresh_interval
                 )
                 
-                logger.info(f"已加載 {len(addresses)} 個錢包地址到緩存")
+                end_time = asyncio.get_event_loop().time()
+                duration = end_time - start_time
+                logger.info(f"錢包地址加載完成，耗時: {duration:.2f}秒，共 {len(addresses)} 個地址")
+                
         except Exception as e:
             logger.error(f"加載錢包地址到緩存時發生錯誤: {str(e)}")
+            # 設置空緩存，避免後續查詢失敗
+            await cache_service.set(self.cache_key, [], expiry=self.refresh_interval)
+            raise
     
     async def _periodic_refresh(self):
         """定期刷新緩存數據"""
         while True:
             try:
+                await asyncio.sleep(self.refresh_interval)
                 logger.info("開始定期刷新錢包地址緩存...")
-                await self._load_wallet_addresses()
+                await asyncio.wait_for(self._load_wallet_addresses(), timeout=60)  # 刷新時也設置超時
                 logger.info("錢包地址緩存刷新完成")
+            except asyncio.TimeoutError:
+                logger.warning("定期刷新錢包地址緩存超時，將在下次刷新時重試")
             except Exception as e:
                 logger.error(f"刷新錢包地址緩存時發生錯誤: {str(e)}")
-            
-            await asyncio.sleep(self.refresh_interval)
     
     async def is_wallet_exists(self, wallet_address: str) -> bool:
         """
@@ -85,12 +121,16 @@ class WalletCacheService:
             addresses = await cache_service.get(self.cache_key)
             
             if addresses is None:
-                # 如果緩存不存在，重新加載
-                await self._load_wallet_addresses()
-                addresses = await cache_service.get(self.cache_key)
+                # 如果緩存不存在，重新加載（使用較短的超時時間）
+                try:
+                    await asyncio.wait_for(self._load_wallet_addresses(), timeout=10)
+                    addresses = await cache_service.get(self.cache_key)
+                except asyncio.TimeoutError:
+                    logger.warning("重新加載錢包地址超時，返回 False")
+                    return False
             
             # 檢查地址是否存在
-            return wallet_address in addresses
+            return wallet_address in (addresses or [])
         except Exception as e:
             logger.error(f"檢查錢包地址時發生錯誤: {str(e)}")
             return False
