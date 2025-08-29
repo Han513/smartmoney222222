@@ -24,18 +24,13 @@ class CacheService:
         """
         if self.redis is None:
             try:
-                # 使用 redis 庫的異步客戶端
-                logger.info("使用 redis 異步客戶端")
+                # 使用 redis 庫的異步客戶端，透過 URL 正確處理密碼/DB/參數
+                logger.info("使用 redis 異步客戶端 (from_url)")
+                import os
                 import redis.asyncio as redis
-                # 解析 Redis URL
-                from urllib.parse import urlparse
-                parsed = urlparse(self.redis_url)
-                self.redis = redis.Redis(
-                    host=parsed.hostname or 'localhost',
-                    port=parsed.port or 6379,
-                    db=int(parsed.path[1:]) if parsed.path and len(parsed.path) > 1 else 0,
-                    decode_responses=True
-                )
+                # 當使用集群模式時，URL 不應包含 DB（已在 config 組裝時處理）
+                # 若仍給出 DB，部分雲廠商 cluster/proxy 會拒絕 SELECT 指令
+                self.redis = redis.Redis.from_url(self.redis_url, decode_responses=True)
                 # 測試連接
                 await self.redis.ping()
                 logger.info("Redis 異步連接成功")

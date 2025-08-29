@@ -183,12 +183,13 @@ class WalletTokenAnalyzer:
                     logger.error(f"更新分析數據時發生錯誤: {str(e)}")
     
     def _filter_db_fields(self, data: dict) -> dict:
+        # 移除 updated_at，避免產生「僅更新 updated_at」的無效寫入
         db_fields = {
             "wallet_address", "token_address", "chain", "total_amount", "total_cost", "avg_buy_price",
             "position_opened_at", "historical_total_buy_amount", "historical_total_buy_cost",
             "historical_total_sell_amount", "historical_total_sell_value", "historical_avg_buy_price",
             "historical_avg_sell_price", "last_active_position_closed_at", "last_transaction_time",
-            "realized_profit", "realized_profit_percentage", "updated_at",
+            "realized_profit", "realized_profit_percentage",
             "total_buy_count", "total_sell_count"
         }
         return {k: v for k, v in data.items() if k in db_fields}
@@ -378,19 +379,39 @@ class WalletTokenAnalyzer:
                 TokenBuyData.wallet_address == analysis_data['wallet_address'],
                 TokenBuyData.token_address == analysis_data['token_address']
             )
-            result = session.execute(stmt).scalar_one_or_none()
-            if result:
-                # 更新
-                session.execute(
-                    update(TokenBuyData)
-                    .where(TokenBuyData.wallet_address == analysis_data['wallet_address'],
-                           TokenBuyData.token_address == analysis_data['token_address'])
-                    .values(**db_data)
-                )
+            row = session.execute(stmt).scalar_one_or_none()
+            if row:
+                # 僅在有實質變更或 last_transaction_time 單調遞增時才更新
+                def _diff(a, b, eps: float = 1e-9):
+                    try:
+                        return abs(float(a) - float(b)) > eps
+                    except Exception:
+                        return a != b
+
+                has_changes = False
+                for k, v in db_data.items():
+                    if hasattr(row, k) and _diff(getattr(row, k), v):
+                        has_changes = True
+                        break
+                # 強制單調遞增檢查（若存在於 db_data 中）
+                ltt_new = db_data.get("last_transaction_time")
+                if not has_changes and ltt_new is not None and (row.last_transaction_time or 0) < (ltt_new or 0):
+                    has_changes = True
+
+                if has_changes:
+                    db_data_with_ts = dict(db_data)
+                    db_data_with_ts["updated_at"] = datetime.now(timezone.utc).astimezone(timezone(timedelta(hours=8))).replace(tzinfo=None)
+                    session.execute(
+                        update(TokenBuyData)
+                        .where(TokenBuyData.wallet_address == analysis_data['wallet_address'],
+                               TokenBuyData.token_address == analysis_data['token_address'])
+                        .values(**db_data_with_ts)
+                    )
+                    session.commit()
             else:
                 # 新增
                 session.add(TokenBuyData(**db_data))
-            session.commit()
+                session.commit()
         # 只保留指定欄位寫入緩存
         cache_data = {
             "wallet_address": analysis_data.get("wallet_address"),

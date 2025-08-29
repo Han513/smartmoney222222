@@ -31,10 +31,7 @@ class Settings(BaseSettings):
     _REDIS_AUTH: str = f":{REDIS_PASSWORD}@" if REDIS_PASSWORD else ""
 
     # Redis 連線字串，優先使用環境變量 REDIS_URL
-    REDIS_URL: str = os.getenv(
-        "REDIS_URL",
-        f"redis://{_REDIS_AUTH}{REDIS_HOST}:{REDIS_PORT}/{REDIS_DB}"
-    )
+    REDIS_URL: str = os.getenv("REDIS_URL", "")
     
     # Celery Broker & Backend，優先使用環境變量，如未指定則動態組裝
     CELERY_BROKER_URL: str = os.getenv(
@@ -66,6 +63,16 @@ class Settings(BaseSettings):
     
     # Ian 資料庫配置 - 用於查詢 trades 表
     DATABASE_URI_Ian: str = os.getenv("DATABASE_URI_Ian", "")
+    
+    # SelectDB（MySQL 相容）配置 - 用於查詢 trades 表
+    SELECTDB_URI: str = os.getenv("SELECTDB_URI", "")
+
+    # SelectDB 環境變數（推薦使用）—— 若未提供 SELECTDB_URI 時用這些組裝
+    SELECTDB_HOST: str = os.getenv("SELECTDB_HOST", os.getenv("DB_HOST", "127.0.0.1"))
+    SELECTDB_PORT: str = os.getenv("SELECTDB_PORT", os.getenv("DB_PORT", "5012"))
+    SELECTDB_USER: str = os.getenv("SELECTDB_USER", os.getenv("DB_USER", "admin"))
+    SELECTDB_PASSWORD: str = os.getenv("SELECTDB_PASSWORD", os.getenv("DB_PASSWORD", "Ro5w214Cd79b4D"))
+    SELECTDB_NAME: str = os.getenv("SELECTDB_NAME", os.getenv("DB_NAME", "smart_money"))
     
     # 資料庫功能開關
     DB_ENABLED: bool = True
@@ -106,6 +113,58 @@ class Settings(BaseSettings):
             default_url = super().__getattribute__(name)
             logger.info(f"未找到 DATABASE_URI_Solana 環境變數，使用預設 URL: {default_url}")
             return default_url
+        
+        if name == 'SELECTDB_URI':
+            # 優先使用顯式設定的 SELECTDB_URI
+            import os
+            from urllib.parse import quote_plus
+            logger = logging.getLogger(__name__)
+            env_url = os.getenv('SELECTDB_URI')
+            if env_url:
+                logger.info(f"使用環境變數 SELECTDB_URI: {env_url}")
+                return env_url
+            # 若未提供，依照 .env 的 DB_* 參數自動組裝
+            # 先用 SELECTDB_*，若缺失再回退 DB_*
+            host = os.getenv('SELECTDB_HOST', self.SELECTDB_HOST)
+            port = os.getenv('SELECTDB_PORT', self.SELECTDB_PORT)
+            user = os.getenv('SELECTDB_USER', self.SELECTDB_USER)
+            password = os.getenv('SELECTDB_PASSWORD', self.SELECTDB_PASSWORD)
+            dbname = os.getenv('SELECTDB_NAME', self.SELECTDB_NAME)
+            user_enc = quote_plus(user)
+            pwd_enc = quote_plus(password)
+            assembled = f"mysql+pymysql://{user_enc}:{pwd_enc}@{host}:{port}/{dbname}"
+            logger.info(f"未提供 SELECTDB_URI，使用 SELECTDB_* / DB_* 組裝: {assembled}")
+            return assembled
+        
+        if name == 'REDIS_URL':
+            # 優先使用環境變量 REDIS_URL；若未提供，依當前設定動態組裝
+            import os
+            from urllib.parse import quote_plus
+            logger = logging.getLogger(__name__)
+            env_url = os.getenv('REDIS_URL')
+            if env_url:
+                logger.info(f"使用環境變數 REDIS_URL: {env_url}")
+                return env_url
+
+            host = os.getenv('REDIS_HOST', self.REDIS_HOST)
+            port = os.getenv('REDIS_PORT', str(self.REDIS_PORT))
+            db = os.getenv('REDIS_DB', str(self.REDIS_DB))
+            password = os.getenv('REDIS_PASSWORD', self.REDIS_PASSWORD or "")
+            is_cluster = os.getenv('REDIS_CLUSTER', 'false').lower() in ('1', 'true', 'yes')
+
+            # URL 需要對密碼做 URL encode
+            pwd_enc = quote_plus(password) if password else ""
+            auth = f":{pwd_enc}@" if pwd_enc else ""
+
+            assembled = f"redis://{auth}{host}:{port}"
+            if not is_cluster:
+                assembled = f"{assembled}/{db}"
+            else:
+                if db not in (None, '', '0', 0):
+                    logger.warning("Redis cluster 模式不支援多 DB，已忽略 REDIS_DB 設定")
+
+            logger.info(f"未提供 REDIS_URL，使用當前設定組裝: {assembled}")
+            return assembled
         
         return super().__getattribute__(name)
 

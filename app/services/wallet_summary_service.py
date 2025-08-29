@@ -107,7 +107,8 @@ class WalletSummaryService:
         wallet_address: str, 
         tx_stats: Dict[str, Any] = None,
         twitter_name: Optional[str] = None,
-        twitter_username: Optional[str] = None
+        twitter_username: Optional[str] = None,
+        is_smart_wallet: bool = False
     ) -> bool:
         """
         完整更新錢包摘要（用於歷史數據分析）

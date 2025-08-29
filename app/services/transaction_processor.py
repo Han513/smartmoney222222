@@ -74,6 +74,13 @@ class TransactionProcessor:
         db_uri_ian = os.getenv('DATABASE_URI_Ian', '未設定')
         logger.info(f"環境變數 DATABASE_URI_Ian: {db_uri_ian}")
         
+        # SelectDB（MySQL 相容）連接（用於查詢 trades 表）
+        self.selectdb_engine = None
+        self.selectdb_session_factory = None
+        self._selectdb_connection_tested_successfully = False
+        selectdb_uri = os.getenv('SELECTDB_URI', '未設定')
+        logger.info(f"環境變數 SELECTDB_URI: {selectdb_uri}")
+        
         self.token_info_cache = {
         "So11111111111111111111111111111111111111112": {
             "symbol": "SOL",
@@ -150,8 +157,20 @@ class TransactionProcessor:
         self.state_cache_update_interval = 180  # 狀態緩存更新間隔（秒）
         self.last_state_cache_update = time.time()  # 上次狀態緩存更新時間
         self.pending_state_updates = 0  # 待更新的狀態數量
+        # 週期性全量回灌 WalletTokenState 的設定（控制占用時間與頻率）
+        self.state_sync_interval = 60   # 週期回灌間隔（秒）
+        self.state_sync_max_per_cycle = 200  # 單輪最多處理幾筆（避免長時間持有連線）
+        self.state_sync_time_budget = 1.5    # 單輪時間配額（秒），到時即停止，下一輪再繼續
+        self.state_sync_throttle = 0.002     # 每筆之間的微小睡眠，降低壓力（秒）
+        self.state_sync_backoff = 5          # 若出現連線/超時錯誤時的退避（秒）
+        self._state_sync_task = None   # 週期同步任務引用
         self.max_signature_cache_size = 2000
         self._pending_lock = None  # 延遲初始化
+
+        # WalletTokenState 去重機制（避免多路徑重複累加歷史計數）
+        self._processed_state_updates: Dict[str, float] = {}
+        self._state_update_cache_expiry: float = 3600.0  # 秒
+        self._last_state_update_cleanup: float = time.time()
     
     def activate(self):
         """激活交易處理器，啟動事件處理循環"""
@@ -175,6 +194,9 @@ class TransactionProcessor:
             loop = asyncio.get_running_loop()
             if loop and not loop.is_closed():
                 asyncio.create_task(self._load_wallet_token_states_to_cache())
+                # 啟動定時全量回灌任務
+                if self._state_sync_task is None or self._state_sync_task.done():
+                    self._state_sync_task = asyncio.create_task(self._state_sync_loop())
         except RuntimeError:
             # 沒有運行中的事件循環，跳過異步任務創建
             pass
@@ -247,6 +269,21 @@ class TransactionProcessor:
             if self.pending_events:
                 logger.warning("沒有事件循環，直接清空剩餘事件")
                 self.pending_events.clear()
+
+        # 停止定時同步任務並做一次強制回灌
+        try:
+            loop = asyncio.get_running_loop()
+            if loop and not loop.is_closed():
+                if self._state_sync_task is not None:
+                    self._state_sync_task.cancel()
+                    try:
+                        await self._state_sync_task
+                    except asyncio.CancelledError:
+                        pass
+                await self._flush_all_wallet_token_states()
+        except RuntimeError:
+            # 沒有事件循環，忽略
+            pass
 
     # ======= 以下為已註解的定時推送相關邏輯 =======
     # async def _process_events_loop(self):
@@ -375,7 +412,7 @@ class TransactionProcessor:
             return True
         try:
             logger.info(f"開始批量發送 {len(filtered_events)} 個事件")
-            print(filtered_events)
+            # print(filtered_events)
             import aiohttp
             async with aiohttp.ClientSession() as session:
                 async with session.post(
@@ -504,6 +541,17 @@ class TransactionProcessor:
         self.ian_session_factory = None
         self._ian_connection_tested_successfully = False
         
+        # 關閉 SelectDB 連線
+        if getattr(self, 'selectdb_engine', None):
+            try:
+                logger.info("關閉 SelectDB 資料庫連接")
+                self.selectdb_engine.dispose()
+            except Exception:
+                pass
+        self.selectdb_engine = None
+        self.selectdb_session_factory = None
+        self._selectdb_connection_tested_successfully = False
+        
     def _init_ian_db_connection(self) -> bool:
         """
         初始化 Ian 資料庫連接（用於查詢 trades 表）
@@ -555,6 +603,48 @@ class TransactionProcessor:
                 return False
                 
         return self._ian_connection_tested_successfully
+
+    def _init_selectdb_connection(self) -> bool:
+        """
+        初始化 SelectDB（MySQL 相容）連接（用於查詢 trades 表）
+        """
+        if self._selectdb_connection_tested_successfully:
+            return True
+        
+        if not settings.SELECTDB_URI:
+            logger.warning("SELECTDB_URI 未設定，將回退使用 Ian 資料庫查詢 trades")
+            return False
+        
+        if self.selectdb_engine is None or self.selectdb_session_factory is None:
+            try:
+                db_url = settings.SELECTDB_URI
+                logger.info(f"初始化 SelectDB 連接: {db_url}")
+                # 透過 SQLAlchemy 的 MySQL+pymysql Driver 連線
+                if not db_url.startswith('mysql'):
+                    logger.warning("SELECTDB_URI 非 mysql* 前綴，請確認連線字串格式，例如: mysql+pymysql://user:pwd@host:port/dbname")
+                self.selectdb_engine = create_engine(
+                    db_url,
+                    echo=False,
+                    future=True,
+                    pool_size=5,
+                    max_overflow=10,
+                    pool_timeout=30,
+                    pool_recycle=1800,
+                    pool_pre_ping=True
+                )
+                self.selectdb_session_factory = sessionmaker(bind=self.selectdb_engine)
+                with self.selectdb_session_factory() as session:
+                    session.execute(text("SELECT 1"))
+                self._selectdb_connection_tested_successfully = True
+                logger.info("SelectDB 連接測試成功")
+                return True
+            except Exception as e:
+                logger.error(f"初始化 SelectDB 連接失敗: {e}")
+                self.selectdb_engine = None
+                self.selectdb_session_factory = None
+                self._selectdb_connection_tested_successfully = False
+                return False
+        return self._selectdb_connection_tested_successfully
     
     def get_wallet_balance(self, wallet_address: str) -> Dict[str, Any]:
         """獲取錢包餘額數據"""
@@ -941,8 +1031,12 @@ class TransactionProcessor:
                 "chain": "SOLANA"
             }
             
-            # 更新WalletTokenState
-            self._update_wallet_token_state_after_transaction(wallet_address, token_address, transaction_type, float(amount), float(value_decimal), float(price), timestamp)
+            # 更新WalletTokenState（帶 signature 去重）
+            self._update_wallet_token_state_after_transaction(
+                wallet_address, token_address, transaction_type,
+                float(amount), float(value_decimal), float(price), timestamp,
+                signature=tx_hash,
+            )
             
             return {
                 "success": True,
@@ -1082,32 +1176,73 @@ class TransactionProcessor:
                         last_transaction_time = cache_data.get("last_transaction_time", int(time.time()))
                         
                         if token_address in record_map:
-                            # 更新現有記錄
+                            # 只在有實質變更時才更新，避免僅更新 updated_at 造成的無效寫入
                             record = record_map[token_address]
-                            record.chain = "SOLANA"
-                            record.total_amount = total_amount
-                            record.total_cost = total_cost
-                            record.avg_buy_price = avg_buy_price
-                            record.historical_total_buy_amount = historical_buy_amount
-                            record.historical_total_buy_cost = historical_buy_cost
-                            record.historical_total_sell_amount = historical_sell_amount
-                            record.historical_total_sell_value = historical_sell_value
-                            record.realized_profit = realized_profit
-                            record.last_transaction_time = last_transaction_time
-                            record.updated_at = now_utc8()
-                            
-                            # Recalculate historical average prices
-                            record.historical_avg_buy_price = historical_buy_cost / historical_buy_amount if historical_buy_amount > 0 else 0.0
-                            record.historical_avg_sell_price = historical_sell_value / historical_sell_amount if historical_sell_amount > 0 else 0.0
-                            
-                            # 特殊邏輯: 第一次交易和最後一次交易時間
+                            has_changes = False
+
+                            # 比較並更新需要的欄位（浮點數允許極小誤差）
+                            def _diff(a, b, eps: float = 1e-9):
+                                try:
+                                    return abs(float(a) - float(b)) > eps
+                                except Exception:
+                                    return a != b
+
+                            if record.chain != "SOLANA":
+                                record.chain = "SOLANA"
+                                has_changes = True
+                            if _diff(record.total_amount, total_amount):
+                                record.total_amount = total_amount
+                                has_changes = True
+                            if _diff(record.total_cost, total_cost):
+                                record.total_cost = total_cost
+                                has_changes = True
+                            if _diff(record.avg_buy_price, avg_buy_price):
+                                record.avg_buy_price = avg_buy_price
+                                has_changes = True
+                            if _diff(record.historical_total_buy_amount, historical_buy_amount):
+                                record.historical_total_buy_amount = historical_buy_amount
+                                has_changes = True
+                            if _diff(record.historical_total_buy_cost, historical_buy_cost):
+                                record.historical_total_buy_cost = historical_buy_cost
+                                has_changes = True
+                            if _diff(record.historical_total_sell_amount, historical_sell_amount):
+                                record.historical_total_sell_amount = historical_sell_amount
+                                has_changes = True
+                            if _diff(record.historical_total_sell_value, historical_sell_value):
+                                record.historical_total_sell_value = historical_sell_value
+                                has_changes = True
+                            if _diff(record.realized_profit, realized_profit):
+                                record.realized_profit = realized_profit
+                                has_changes = True
+
+                            # 只讓 last_transaction_time 單調遞增
+                            if (record.last_transaction_time or 0) < (last_transaction_time or 0):
+                                record.last_transaction_time = last_transaction_time
+                                has_changes = True
+
+                            # 重新計算衍生欄位（依賴歷史數據）
+                            new_hist_avg_buy = historical_buy_cost / historical_buy_amount if historical_buy_amount > 0 else 0.0
+                            new_hist_avg_sell = historical_sell_value / historical_sell_amount if historical_sell_amount > 0 else 0.0
+                            if _diff(record.historical_avg_buy_price, new_hist_avg_buy):
+                                record.historical_avg_buy_price = new_hist_avg_buy
+                                has_changes = True
+                            if _diff(record.historical_avg_sell_price, new_hist_avg_sell):
+                                record.historical_avg_sell_price = new_hist_avg_sell
+                                has_changes = True
+
+                            # 特殊邏輯: 第一次交易與清倉結束時間
                             if not record.position_opened_at and historical_buy_amount > 0:
                                 record.position_opened_at = now_utc8().timestamp()
-                            
+                                has_changes = True
                             if total_amount == 0 and historical_sell_amount > 0:
+                                # 僅在清倉時更新
                                 record.last_active_position_closed_at = now_utc8().timestamp()
-                            
-                            updated_records.append(token_address)
+                                has_changes = True
+
+                            # 僅在有任何實質欄位變更時，才更新 updated_at 與記錄為已更新
+                            if has_changes:
+                                record.updated_at = now_utc8()
+                                updated_records.append(token_address)
                         else:
                             # 創建新記錄
                             new_record = TokenBuyData(
@@ -2080,7 +2215,7 @@ class TransactionProcessor:
                     if not final_token_name or final_token_name.strip() == "":
                         logger.warning(f"代幣名稱為空，跳過保存交易: {token_address}, signature: {signature}")
                         return True  # 返回True表示"處理成功"，但實際上是跳過了
-                    
+                            
                     # 準備交易資料
                     transaction_data = {
                         "wallet_address": wallet_address,
@@ -2112,18 +2247,28 @@ class TransactionProcessor:
                     # 使用UPSERT模式處理分區表插入
                     # 注意：插入到主表Transaction，PostgreSQL會自動路由到正確的分區
                     try:
-                        # 使用ON CONFLICT進行UPSERT操作
-                        insert_stmt = insert(Transaction).values(**transaction_data)
-                        
-                        # 使用ON CONFLICT DO UPDATE，明確指定衝突的列
-                        insert_stmt = insert_stmt.on_conflict_do_update(
-                            index_elements=['signature', 'wallet_address', 'token_address', 'transaction_time'],
-                            set_=transaction_data
+                        # 先嘗試 ON CONFLICT DO NOTHING 判斷是否為新交易
+                        insert_stmt = insert(Transaction).values(**transaction_data).on_conflict_do_nothing(
+                            index_elements=['signature', 'wallet_address', 'token_address', 'transaction_time']
                         )
-                        
-                        session.execute(insert_stmt)
+                        result = session.execute(insert_stmt)
+                        inserted = (getattr(result, 'rowcount', 0) or 0) > 0
+
+                        if not inserted:
+                            # 已存在則做同步更新，但不觸發 WalletTokenState 再次累加
+                            update_stmt = update(Transaction).where(
+                                and_(
+                                    Transaction.signature == signature,
+                                    Transaction.wallet_address == wallet_address,
+                                    Transaction.token_address == token_address
+                                )
+                            ).values(**transaction_data)
+                            session.execute(update_stmt)
+
                         session.commit()
-                        logger.info(f"成功保存/更新交易: {signature}, 錢包: {wallet_address}, 代幣: {token_address}")
+                        logger.info(
+                            f"成功保存交易(新建={inserted}): {signature}, 錢包: {wallet_address}, 代幣: {token_address}"
+                        )
 
                         # 構建 API 發送數據
                         smart_token_event_data = {
@@ -2142,7 +2287,16 @@ class TransactionProcessor:
                             "signature": signature,
                             "brand": "BYD"
                         }
-                        await self.add_event_to_pending(smart_token_event_data, signature)
+                        if inserted:
+                            # 僅對新插入的交易進行 WalletTokenState 累加，避免重啟或重跑造成重複累加
+                            self._update_wallet_token_state_after_transaction(
+                                wallet_address, token_address, transaction_type,
+                                amount, value, price, transaction.get("transaction_time"),
+                                signature=signature,
+                            )
+                        
+                        if inserted:
+                            await self.add_event_to_pending(smart_token_event_data, signature)
 
                         return True
                         
@@ -2188,6 +2342,14 @@ class TransactionProcessor:
                                 
                                 session.commit()
                                 logger.info(f"成功使用替代方法保存/更新交易: {signature}")
+                                
+                                # 更新 WalletTokenState 緩存（替代路徑，帶 signature 去重）
+                                self._update_wallet_token_state_after_transaction(
+                                    wallet_address, token_address, transaction_type,
+                                    amount, value, price, transaction.get("transaction_time"),
+                                    signature=signature,
+                                )
+                                
                                 return True
                                 
                             except Exception as inner_e:
@@ -2526,7 +2688,7 @@ class TransactionProcessor:
             # 計算交易統計數據
             with self.session_factory() as session:
                 tx_stats = await self._calculate_wallet_transaction_stats(wallet_address, session)
-            # print(f"tx_stats: {tx_stats}")
+
             # 更新錢包摘要
             success = await wallet_summary_service.update_full_summary(
                 wallet_address=wallet_address,
@@ -3070,27 +3232,77 @@ class TransactionProcessor:
 
     async def fetch_trades_from_db(self, wallet_address: str, min_timestamp: int = None) -> List[Dict[str, Any]]:
         """
-        從 dex_query_v1.trades 表查詢錢包交易記錄
+        從資料庫查詢錢包交易記錄。
+        優先查詢 SelectDB（MySQL 相容），如未配置或失敗則回退到 Ian（PostgreSQL）。
         
-        Args:
-            wallet_address: 錢包地址
-            min_timestamp: 最小時間戳，用於過濾交易記錄
-            
-        Returns:
-            交易記錄列表
+        差異點：
+        - 直接使用表欄位 `token_address`
+        - 以 `is_buy`（1=buy, 0=sell）轉換為 `side`
         """
         try:
-            # 初始化 Ian 資料庫連接
-            if not self._init_ian_db_connection():
-                logger.error("Ian 資料庫連接未初始化，無法查詢 trades 表")
-                return []
-            
             # 計算30天前的時間戳
             if min_timestamp is None:
                 min_timestamp = int(time.time()) - (30 * 24 * 60 * 60)
-            
-            # 構建查詢 SQL
-            trades_sql = text("""
+
+            # 優先使用 SelectDB
+            if self._init_selectdb_connection():
+                try:
+                    trades_sql = text("""
+                        SELECT 
+                            signer,
+                            token_in,
+                            token_out,
+                            token_address,
+                            CASE WHEN is_buy = 1 THEN 'buy' ELSE 'sell' END AS side,
+                            amount_in,
+                            amount_out,
+                            price,
+                            price_usd,
+                            decimals_in,
+                            decimals_out,
+                            timestamp,
+                            tx_hash,
+                            chain_id
+                        FROM dex_query_v1.trades
+                        WHERE signer = :wallet_address 
+                          AND timestamp >= :min_timestamp
+                          AND chain_id = 501
+                        ORDER BY timestamp DESC
+                    """)
+                    with self.selectdb_session_factory() as session:
+                        result = session.execute(trades_sql, {
+                            'wallet_address': wallet_address,
+                            'min_timestamp': min_timestamp
+                        })
+                        trades_data = []
+                        for row in result:
+                            trades_data.append({
+                                'signer': row.signer,
+                                'token_in': getattr(row, 'token_in', None),
+                                'token_out': getattr(row, 'token_out', None),
+                                'token_address': row.token_address,
+                                'side': row.side,
+                                'amount_in': getattr(row, 'amount_in', 0),
+                                'amount_out': getattr(row, 'amount_out', 0),
+                                'price': getattr(row, 'price', 0),
+                                'price_usd': getattr(row, 'price_usd', 0),
+                                'decimals_in': getattr(row, 'decimals_in', 0) or 0,
+                                'decimals_out': getattr(row, 'decimals_out', 0) or 0,
+                                'timestamp': row.timestamp,
+                                'tx_hash': row.tx_hash,
+                                'chain_id': row.chain_id
+                            })
+                    logger.info(f"從 SelectDB 查詢到 {len(trades_data)} 筆交易記錄 for {wallet_address}")
+                    return trades_data
+                except Exception as e:
+                    logger.error(f"從 SelectDB 查詢交易記錄失敗，將回退 Ian: {e}")
+
+            # 回退: 使用 Ian 資料庫
+            if not self._init_ian_db_connection():
+                logger.error("Ian 資料庫連接未初始化，無法查詢 trades 表")
+                return []
+
+            trades_sql_pg = text("""
                 SELECT 
                     signer,
                     token_in,
@@ -3108,17 +3320,15 @@ class TransactionProcessor:
                     chain_id
                 FROM dex_query_v1.trades
                 WHERE signer = :wallet_address 
-                AND timestamp >= :min_timestamp
-                AND chain_id = 501
+                  AND timestamp >= :min_timestamp
+                  AND chain_id = 501
                 ORDER BY timestamp DESC
             """)
-            
             with self.ian_session_factory() as session:
-                result = session.execute(trades_sql, {
+                result = session.execute(trades_sql_pg, {
                     'wallet_address': wallet_address,
                     'min_timestamp': min_timestamp
                 })
-                
                 trades_data = []
                 for row in result:
                     trades_data.append({
@@ -3137,12 +3347,10 @@ class TransactionProcessor:
                         'tx_hash': row.tx_hash,
                         'chain_id': row.chain_id
                     })
-                
-                logger.info(f"從 Ian 資料庫查詢到 {len(trades_data)} 筆交易記錄 for {wallet_address}")
-                return trades_data
-                
+            logger.info(f"從 Ian 資料庫查詢到 {len(trades_data)} 筆交易記錄 for {wallet_address}")
+            return trades_data
         except Exception as e:
-            logger.error(f"從 Ian 資料庫查詢交易記錄失敗: {str(e)}")
+            logger.error(f"查詢交易記錄失敗: {str(e)}")
             return []
     
     def normalize_trade(self, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -3365,10 +3573,11 @@ class TransactionProcessor:
                     }
                     transaction_rows.append(tx_data)
                     
-                    # 更新 WalletTokenState 緩存
+                    # 更新 WalletTokenState 緩存（來源為歷史轉換列表，帶 tx_hash 去重）
                     self._update_wallet_token_state_after_transaction(
                         trade_row['signer'], trade_row['token_address'], transaction_type,
-                        trade_row['amount'], value, price, ts
+                        trade_row['amount'], value, price, ts,
+                        signature=trade_row['tx_hash'],
                     )
             
             logger.info(f"轉換了 {len(transaction_rows)} 筆交易記錄")
@@ -3647,8 +3856,8 @@ class TransactionProcessor:
                 self.pending_state_updates = 0
                 self.last_state_cache_update = current_time
 
-                # 在背景執行更新
-                asyncio.create_task(self._update_state_cache_to_db(wallet_address, token_address))
+                # 在背景執行批次回灌，避免單筆頻繁寫入
+                asyncio.create_task(self._flush_all_wallet_token_states())
 
     async def _update_state_cache_to_db(self, wallet_address: str, token_address: str):
         """將狀態緩存數據更新到數據庫"""
@@ -3662,6 +3871,122 @@ class TransactionProcessor:
             
         except Exception as e:
             logger.error(f"更新狀態緩存到數據庫時發生錯誤: {str(e)}")
+
+    async def _flush_all_wallet_token_states(self) -> bool:
+        """將當前緩存中的 WalletTokenState 以受控方式回灌到資料表。
+        - 優先使用單語句「批次 UPSERT」減少連線與往返
+        - 遵循單輪處理上限與時間配額，避免長時間占用資料庫連線
+        - 失敗時可回退為逐筆寫入，並記錄錯誤
+        """
+        try:
+            if not self.wallet_token_state_cache:
+                return True
+            db_ready = self._init_db_connection()
+            if not db_ready:
+                logger.error("數據庫未就緒，無法全量回灌 WalletTokenState")
+                return False
+            # 構建本輪批次
+            total = 0
+            started = time.time()
+            batch_items = []
+            for cache_key, state in list(self.wallet_token_state_cache.items()):
+                if (time.time() - started) >= self.state_sync_time_budget:
+                    break
+                if len(batch_items) >= self.state_sync_max_per_cycle:
+                    break
+                try:
+                    wallet_address, token_address = cache_key.split(":", 1)
+                except ValueError:
+                    continue
+                batch_items.append((wallet_address, token_address, state))
+
+            if not batch_items:
+                logger.info("✅ 受控回灌 WalletTokenState 完成，本輪無需落庫")
+                return True
+
+            # 優先嘗試批次 UPSERT
+            try:
+                from sqlalchemy.dialects.postgresql import insert as pg_insert
+                with self.session_factory() as session:
+                    values_list = [
+                        {
+                            'wallet_address': w,
+                            'token_address': t,
+                            'chain': 'SOLANA',
+                            'chain_id': 501,
+                            'current_amount': s['current_amount'],
+                            'current_total_cost': s['current_total_cost'],
+                            'current_avg_buy_price': s['current_avg_buy_price'],
+                            'position_opened_at': s['position_opened_at'],
+                            'historical_buy_amount': s['historical_buy_amount'],
+                            'historical_sell_amount': s['historical_sell_amount'],
+                            'historical_buy_cost': s['historical_buy_cost'],
+                            'historical_sell_value': s['historical_sell_value'],
+                            'historical_realized_pnl': s['historical_realized_pnl'],
+                            'historical_buy_count': s['historical_buy_count'],
+                            'historical_sell_count': s['historical_sell_count'],
+                            'last_transaction_time': s['last_transaction_time'],
+                            'updated_at': now_utc8(),
+                        }
+                        for (w, t, s) in batch_items
+                    ]
+                    stmt = pg_insert(WalletTokenState).values(values_list)
+                    stmt = stmt.on_conflict_do_update(
+                        index_elements=['wallet_address', 'token_address', 'chain'],
+                        set_={
+                            'current_amount': stmt.excluded.current_amount,
+                            'current_total_cost': stmt.excluded.current_total_cost,
+                            'current_avg_buy_price': stmt.excluded.current_avg_buy_price,
+                            'position_opened_at': stmt.excluded.position_opened_at,
+                            'historical_buy_amount': stmt.excluded.historical_buy_amount,
+                            'historical_sell_amount': stmt.excluded.historical_sell_amount,
+                            'historical_buy_cost': stmt.excluded.historical_buy_cost,
+                            'historical_sell_value': stmt.excluded.historical_sell_value,
+                            'historical_realized_pnl': stmt.excluded.historical_realized_pnl,
+                            'historical_buy_count': stmt.excluded.historical_buy_count,
+                            'historical_sell_count': stmt.excluded.historical_sell_count,
+                            'last_transaction_time': stmt.excluded.last_transaction_time,
+                            'updated_at': now_utc8(),
+                        },
+                    )
+                    session.execute(stmt)
+                    session.commit()
+                    total = len(batch_items)
+                    logger.info(f"✅ 受控回灌 WalletTokenState 完成，批次 UPSERT {total} 條")
+                    # 輕微節流，避免壓力尖峰
+                    await asyncio.sleep(self.state_sync_throttle)
+                    return True
+            except Exception as e:
+                logger.error(f"批次 UPSERT WalletTokenState 失敗，將回退逐筆處理: {e}")
+                # 回退為逐筆處理
+                for (wallet_address, token_address, state) in batch_items:
+                    try:
+                        ok = await self._save_wallet_token_state_to_db(wallet_address, token_address, state)
+                        if ok:
+                            total += 1
+                        await asyncio.sleep(self.state_sync_throttle)
+                    except Exception as inner_e:
+                        logger.error(f"回退逐筆寫入失敗 {wallet_address}:{token_address}: {inner_e}")
+                        await asyncio.sleep(self.state_sync_backoff)
+                logger.info(f"✅ 受控回灌 WalletTokenState 完成，逐筆落庫 {total} 條")
+                return True
+        except Exception as e:
+            logger.error(f"全量回灌 WalletTokenState 時發生錯誤: {str(e)}")
+            return False
+
+    async def _state_sync_loop(self):
+        """週期性地將緩存中的 WalletTokenState 全量回灌到資料表。"""
+        logger.info(f"啟動 WalletTokenState 週期性同步任務，間隔 {self.state_sync_interval}s")
+        try:
+            while self._activated and self.running:
+                try:
+                    await self._flush_all_wallet_token_states()
+                except Exception as e:
+                    logger.error(f"週期性同步 WalletTokenState 失敗: {str(e)}")
+                await asyncio.sleep(self.state_sync_interval)
+        except asyncio.CancelledError:
+            logger.info("WalletTokenState 週期性同步任務已取消")
+            raise
 
     async def _save_wallet_token_state_to_db(self, wallet_address: str, token_address: str, state_data: Dict[str, Any]) -> bool:
         """保存錢包代幣狀態到數據庫 - 使用UPSERT避免唯一約束衝突"""
@@ -3715,7 +4040,7 @@ class TransactionProcessor:
                 
                 session.execute(stmt)
                 session.commit()
-                logger.info(f"成功保存錢包代幣狀態到數據庫: {wallet_address}:{token_address}")
+                logger.debug(f"WalletTokenState 單筆 UPSERT 完成: {wallet_address}:{token_address}")
                 return True
                 
         except Exception as e:
@@ -3754,9 +4079,25 @@ class TransactionProcessor:
             # 發生錯誤時，回退到原來的邏輯
             return "buy" if is_buy else "sell"
 
-    def _update_wallet_token_state_after_transaction(self, wallet_address, token_address, transaction_type, amount, value, price, timestamp):
+    def _update_wallet_token_state_after_transaction(self, wallet_address, token_address, transaction_type, amount, value, price, timestamp, signature: str = None):
         """更新錢包代幣狀態緩存"""
         cache_key = f"{wallet_address}:{token_address}"
+
+        # 多路徑去重：相同 (signature, wallet, token) 僅更新一次
+        if signature:
+            dedup_key = f"{signature}:{cache_key}"
+            now_ts = time.time()
+            # 週期性清理
+            if (now_ts - self._last_state_update_cleanup) > self._state_update_cache_expiry:
+                self._processed_state_updates = {
+                    k: t for k, t in self._processed_state_updates.items()
+                    if (now_ts - t) <= self._state_update_cache_expiry
+                }
+                self._last_state_update_cleanup = now_ts
+            if dedup_key in self._processed_state_updates:
+                logger.debug(f"跳過重複 WalletTokenState 累計: {dedup_key}")
+                return
+            self._processed_state_updates[dedup_key] = now_ts
         
         # 獲取當前狀態，如果不存在則創建預設狀態
         if cache_key not in self.wallet_token_state_cache:
@@ -3841,7 +4182,7 @@ class TransactionProcessor:
         # 更新緩存
         self.wallet_token_state_cache[cache_key] = state
         
-        # 觸發數據庫更新
+        # 觸發數據庫更新（僅標記緩存，實際落庫由批次任務處理）
         self.update_wallet_token_state(wallet_address, token_address, state)
 
     def calculate_realized_profit_with_cache(self, wallet_address: str, token_address: str, amount: float, sell_price: float) -> Tuple[float, float]:
