@@ -187,7 +187,7 @@ class TokenBuyData(Base):
     total_holding_seconds = Column(BIGINT, default=0, comment="總持倉秒數")
     chain_id = Column(Integer, nullable=False)
     date = Column(DateTime)
-    updated_at = Column(DateTime, nullable=False, default=get_utc8_time, comment="最後更新時間")
+    updated_at = Column(DateTime, nullable=False, default=get_utc8_time, onupdate=get_utc8_time, comment="最後更新時間")
     
     __table_args__ = (
         UniqueConstraint('wallet_address', 'token_address', name='uix_wallet_token'),

@@ -1239,9 +1239,8 @@ class TransactionProcessor:
                                 record.last_active_position_closed_at = now_utc8().timestamp()
                                 has_changes = True
 
-                            # 僅在有任何實質欄位變更時，才更新 updated_at 與記錄為已更新
+                            # 僅在有任何實質欄位變更時，記錄為已更新（updated_at 由模型 onupdate 自動處理）
                             if has_changes:
-                                record.updated_at = now_utc8()
                                 updated_records.append(token_address)
                         else:
                             # 創建新記錄
@@ -2629,7 +2628,7 @@ class TransactionProcessor:
                                 existing_record.total_amount = float(new_total_amount)
                                 existing_record.total_cost = float(new_total_cost)
                                 existing_record.avg_buy_price = float(new_avg_buy_price)
-                                existing_record.updated_at = now_utc8()
+                                # updated_at 由模型 onupdate 自動處理
                                 
                                 if is_buy_event and new_total_amount > 0:
                                     existing_record.position_opened_at = int(now_utc8().timestamp())
